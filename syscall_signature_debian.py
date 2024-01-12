@@ -39,7 +39,7 @@ def main(syscall: str):
 
     def find_start_line(syscall: str, lines: list[str]) -> Optional[int]:
         for i, line in enumerate(lines):
-            if line.startswith("asmlinkage") and f"sys_{syscall}" in line and not f"ksys_{syscall}" in line:
+            if line.startswith("asmlinkage") and f"sys_{syscall}(" in line and not f"ksys_{syscall}(" in line:
                 return i
         return None
 
@@ -52,8 +52,10 @@ def main(syscall: str):
 
     syscall = syscall[4:] if syscall.startswith("sys_") else syscall
     start = find_start_line(syscall, lines)
+    if start is None:
+        raise ValueError(f"Could not find syscall {syscall} in {syscall_signatures}")
     end = find_end_line(start, lines)
-    assert start is not None
+    
 
     signature = " ".join(lines[start:(end + 1)])
 
@@ -64,8 +66,11 @@ def main(syscall: str):
         assert words[0] == "asmlinkage"
         assert words[2].startswith("sys_")
 
+        # Apply transformations.
         words[2] = words[2][4:]
-        return " ".join(words[1:])
+        words = words[1:]
+        words = [x for x in words if x != "__user"]
+        return " ".join(words)
 
     print(fmt_signature(signature))
 

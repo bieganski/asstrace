@@ -8,13 +8,25 @@
 #include <sys/user.h>
 #include <sys/syscall.h>
 #include <assert.h>
+#include <dlfcn.h>
+#include <functional>
+#include <string>
 
 #include "gen/syscall_names.h"
 
+int BIG_INT = 1;
+
 int main(int argc, char *argv[]) {
-    if (argc < 2) {
-        fprintf(stderr, "Usage: %s <executable>\n", argv[0]);
+    if (argc < 3) {
+        fprintf(stderr, "Usage: %s <filterlib.so> <executable>\n", argv[0]);
         exit(EXIT_FAILURE);
+    }
+
+    void* filter_lib_handle = dlopen(argv[1], RTLD_LAZY);
+
+    if (filter_lib_handle == nullptr) {
+        fprintf(stderr, "Error opening filter library <%s>, because: %s\n", argv[1], dlerror());
+        exit(1);
     }
 
     pid_t child_pid;
@@ -24,7 +36,7 @@ int main(int argc, char *argv[]) {
             perror("ptrace");
             exit(EXIT_FAILURE);
         }
-        execvp(argv[1], argv + 1);
+        execvp(argv[2], argv + 2);
         perror("execvp");
         exit(EXIT_FAILURE);
     } else if (child_pid < 0) {
@@ -53,9 +65,36 @@ int main(int argc, char *argv[]) {
             }
 
             ptrace(PTRACE_GETREGS, child_pid, NULL, &regs);
-            // printf("Syscall number: %llu\n", regs.orig_rax);
             assert(regs.orig_rax < 448);
-            printf("%s\n", syscall_names[regs.orig_rax]);
+            
+            const char* syscall_name = syscall_names[regs.orig_rax];
+            printf("%llu: %s\n", regs.orig_rax, syscall_name);
+
+            static char filter_symbol_name[1024];
+            snprintf(filter_symbol_name, 1023, "asstrace_%s", syscall_name);
+
+            // check whether user has defined asstrace_<syscall_name> symbol in libfilter.so
+            void* user_hook = dlsym(filter_lib_handle, filter_symbol_name);
+            long hook_ret;
+            
+            if (user_hook != nullptr) {
+                fprintf(stderr, "%s defined (mapped to %p), passing control..\n", filter_symbol_name, user_hook);
+
+                printf("syscall_name loop: %s\n", syscall_name);
+                if (std::string(syscall_name) == "read") {
+                    auto fn_hook = reinterpret_cast<std::function<long(long, long, long)>*>(user_hook);
+                    hook_ret = (*fn_hook)(1l, 2l, 3l);
+                } else if (std::string(syscall_name) == "munmap") {
+                    auto fn_hook = reinterpret_cast<std::function<long(long, long)>*>(user_hook);
+                    hook_ret = (*fn_hook)(1l, 2l);
+                } else {
+                    assert(false);
+                }
+                printf("hook ret: %ld\n", hook_ret);
+            } else {
+                // printf("orig_syscall %s NOT FOUND\n", symbol_name);
+            }
+            
         }
     }
 

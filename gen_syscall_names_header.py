@@ -13,7 +13,7 @@ assert all(x[1].startswith("__NR_") for x in defs)
 
 m = dict((int(num), name[5:]) for _, name, num in defs)
 
-joined_str = ",\n".join(f'"{m.get(x, "")}"' for x in range(max(m.keys())))
+joined_str = ",\n".join(f'"{m.get(x, "")}" /* {x} */' for x in range(max(m.keys())))
 
 print(
     f"""
