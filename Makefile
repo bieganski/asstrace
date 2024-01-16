@@ -1,5 +1,6 @@
 all:
-	python3 gen_syscall_names_header.py > gen/syscall_names.h
+	mkdir -p gen
+	bash ./gen_syscall_headers.sh 2>/dev/null
 	g++ -rdynamic asstrace.cc -o asstrace
 
 filter:

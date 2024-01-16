@@ -9,10 +9,18 @@
 #include <sys/syscall.h>
 #include <assert.h>
 #include <dlfcn.h>
-#include <functional>
 #include <string>
 
+#include <unordered_map>
+
+const std::unordered_map<const char*, int> myGlobalHashMap = {
+    {"one", 1},
+    {"two", 2},
+    {"three", 3}
+};
+
 #include "gen/syscall_names.h"
+#include "gen/syscall_num_params.h"
 
 int BIG_INT = 1;
 
@@ -54,6 +62,13 @@ int main(int argc, char *argv[]) {
 
         printf("Tracing started...\n");
 
+        auto syscall_names_size = sizeof(syscall_names) / sizeof(syscall_names[0]);
+        auto syscall_num_params_size = sizeof(syscall_names) / sizeof(syscall_names[0]);
+        assert (syscall_names_size == syscall_num_params_size);
+
+        int max_syscall_number = syscall_names_size - 1;
+
+
         while (1) {
             struct user_regs_struct regs;
             ptrace(PTRACE_SYSCALL, child_pid, NULL, NULL);
@@ -65,10 +80,14 @@ int main(int argc, char *argv[]) {
             }
 
             ptrace(PTRACE_GETREGS, child_pid, NULL, &regs);
-            assert(regs.orig_rax < 448);
+
+            // arch-specific user_regs reference.
+            unsigned long long syscall_number = regs.orig_rax;
             
-            const char* syscall_name = syscall_names[regs.orig_rax];
-            printf("%llu: %s\n", regs.orig_rax, syscall_name);
+            assert(syscall_number <= max_syscall_number);
+            
+            const char* syscall_name = syscall_names[syscall_number];
+            printf("%llu: %s\n", syscall_number, syscall_name);
 
             static char filter_symbol_name[1024];
             snprintf(filter_symbol_name, 1023, "asstrace_%s", syscall_name);
@@ -80,16 +99,27 @@ int main(int argc, char *argv[]) {
             if (user_hook != nullptr) {
                 fprintf(stderr, "%s defined (mapped to %p), passing control..\n", filter_symbol_name, user_hook);
 
-                printf("syscall_name loop: %s\n", syscall_name);
-                if (std::string(syscall_name) == "read") {
-                    auto fn_hook = reinterpret_cast<std::function<long(long, long, long)>*>(user_hook);
-                    hook_ret = (*fn_hook)(1l, 2l, 3l);
-                } else if (std::string(syscall_name) == "munmap") {
-                    auto fn_hook = reinterpret_cast<std::function<long(long, long)>*>(user_hook);
-                    hook_ret = (*fn_hook)(1l, 2l);
-                } else {
-                    assert(false);
+                int num_params = syscall_num_params[syscall_number];
+
+                assert(num_params >= 0);
+                assert(num_params <= 6);
+
+                if (num_params == 0) {
+                    hook_ret = ((long (*)()) user_hook)();
+                } else if (num_params == 1) {
+                    hook_ret = ((long (*)(long)) user_hook)(1);
+                } else if (num_params == 2) {
+                    hook_ret = ((long (*)(long, long)) user_hook)(1, 2);
+                } else if (num_params == 3) {
+                    hook_ret = ((long (*)(long, long, long)) user_hook)(1, 2, 3);
+                } else if (num_params == 4) {
+                    hook_ret = ((long (*)(long, long, long, long)) user_hook)(1, 2, 3, 4);
+                } else if (num_params == 5) {
+                    hook_ret = ((long (*)(long, long, long, long, long)) user_hook)(1, 2, 3, 4, 5);
+                } else if (num_params == 6) {
+                    hook_ret = ((long (*)(long, long, long, long, long, long)) user_hook)(1, 2, 3, 4, 5, 6);
                 }
+
                 printf("hook ret: %ld\n", hook_ret);
             } else {
                 // printf("orig_syscall %s NOT FOUND\n", symbol_name);
