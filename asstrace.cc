@@ -16,10 +16,9 @@
 
 #define VERBOSE
 
-#define OUTPUT_FD stdout
+#define OUTPUT_FD stderr 
+// stdout
 #define OUTPUT(...) fprintf(OUTPUT_FD, __VA_ARGS__)
-
-using arch_reg_content_t = unsigned long long;
 
 /* TODO
 duplicated from linux/ptrace.h (and unsafe, as it might change for next kernel versions).
@@ -52,35 +51,33 @@ struct ptrace_syscall_info {
 
 // state exposed
 static pid_t tracee_pid = -1;
+static int tracee_argc = -1;
+static char** tracee_argv = nullptr;
+static bool user_requested_syscall_invocation_anyway = false;
 
-// state hidden
-#define INVALID_SYSCALL_NUMBER -1
-// invalid means that either we not yet observed any TRACE_SYSCALL event, or last observed one was SYSCALL_EXIT.
-static arch_reg_content_t current_syscall_number = INVALID_SYSCALL_NUMBER;
+#include "api.h"
 
-static void mark_tracee_started_syscall(int syscall_number) {
-    // assert (current_syscall_number == INVALID_SYSCALL_NUMBER);
-    current_syscall_number = syscall_number;
+void
+__attribute__((noinline, used))
+api_invoke_syscall_anyway() {
+    user_requested_syscall_invocation_anyway = true;
 }
 
-static void mark_tracee_finished_syscall(int syscall_number) {
-    // assert (current_syscall_number == syscall_number);
-    current_syscall_number = INVALID_SYSCALL_NUMBER;
-}
-
-static bool is_tracee_in_syscall() {
-    return current_syscall_number != INVALID_SYSCALL_NUMBER;
-}
-
-
-// TODO: move section below to a separate .h header, to be included by user library.
-extern "C" {
 pid_t
 __attribute__((noinline, used))
-get_tracee_pid() {
+api_get_tracee_pid() {
     return tracee_pid;
 }
+
+std::vector<std::string>
+__attribute__((noinline, used))
+api_get_tracee_cmdline() {
+    std::vector<std::string> res;
+    for(int i = 0; i < tracee_argc; i++)
+        res.push_back(std::string(tracee_argv[i]));
+    return res;
 }
+
 
 static int arch_abi_fun_call_params_order[6] = {
     offsetof(user_regs_struct, rdi),
@@ -112,7 +109,12 @@ static arch_reg_content_t* arch_syscall_ret_addr(struct user_regs_struct* user_r
     return &user_regs->rcx;
 }
 
-long invoke_syscall_mock(void* mock_ptr, int num_params, struct user_regs_struct* user_regs) {
+
+/*
+syscall-like is a function to pointer of signature that
+both params and return value is of 'arch_word_size' width, and number of params is <= 6.
+*/
+long invoke_syscall_like(void* mock_ptr, int num_params, struct user_regs_struct* user_regs) {
     assert(0 <= num_params <= 6);
 
     long hook_ret;
@@ -138,14 +140,28 @@ long invoke_syscall_mock(void* mock_ptr, int num_params, struct user_regs_struct
 
 void check_child_alive_or_exit(int status) {
     if (WIFEXITED(status)) {
-        printf("Child process exited with status %d\n", WEXITSTATUS(status));
-        exit(0);
+        int exit_code = WEXITSTATUS(status);
+        if (exit_code)
+            printf("Child process exited with status %d\n", exit_code);
+        exit(exit_code);
     }
 
     if (WIFSTOPPED(status) && ((WSTOPSIG(status) & 127) != SIGTRAP)) {
-        printf("Tracee received unexpected signal: %d\n", WSTOPSIG(status));
+        printf("Tracee received unexpected signal: %s (%d)\n", strsignal(WSTOPSIG(status)), WSTOPSIG(status));
         exit(1);
     }
+}
+
+int get_sideeffectfree_syscall_number() {
+    constexpr auto name = "getpid";
+    // TODO array sizes should be auto-generated as well.
+    auto num_elems = sizeof(syscall_names) / sizeof(syscall_names[0]);
+    for (int i = 0; i < num_elems; i++) {
+        if (strcmp(name, syscall_names[i]) == 0) {
+            return i;
+        }
+    }
+    assert(false);
 }
 
 int main(int argc, char *argv[]) {
@@ -155,6 +171,7 @@ int main(int argc, char *argv[]) {
 #endif
 
     // Perform gen/*.h sanity check.
+    // TODO array sizes should be auto-generated as well.
     auto syscall_names_size = sizeof(syscall_names) / sizeof(syscall_names[0]);
     auto syscall_num_params_size = sizeof(syscall_names) / sizeof(syscall_names[0]);
     assert (syscall_names_size == syscall_num_params_size);
@@ -165,6 +182,14 @@ int main(int argc, char *argv[]) {
         printf("Usage: %s <./filterlib.so> <executable>\n", argv[0]);
         exit(1);
     }
+
+    // Prepare state before fork.
+    // NOTE: this must be done before 'dlopen', as it might have attribute((constructor))
+    // that calls some API function.
+    tracee_argc = argc - 2;
+    tracee_argv = argv + 2; // TODO: +2 hardcoded
+
+    // Try 'dlopen'.
     void* filter_lib_handle = dlopen(argv[1], RTLD_LAZY);
     if (filter_lib_handle == nullptr) {
         printf("Error opening filter library <%s>, because: %s\n", argv[1], dlerror());
@@ -190,17 +215,31 @@ int main(int argc, char *argv[]) {
         check_child_alive_or_exit(status);
 
         /*
-        man ptrace
+        From 'man ptrace':
 
         In case of system call entry or exit stops, the data
         returned by PTRACE_GET_SYSCALL_INFO is limited to type
         PTRACE_SYSCALL_INFO_NONE unless PTRACE_O_TRACESYSGOOD
         option is set before the corresponding system call stop
         has occurred.
+
+        NOTE: we want PTRACE_O_EXITKILL set unconditionally only until we implement
+        equivalent of strace's '-p <pid>' option.
         */
-        ptrace(PTRACE_SETOPTIONS, tracee_pid, NULL, PTRACE_O_TRACESYSGOOD);
+        ptrace(PTRACE_SETOPTIONS, tracee_pid, NULL, PTRACE_O_TRACESYSGOOD | PTRACE_O_EXITKILL);
+
+
+        // All dependency between consecutive iterations is stored in LoopState.
+        struct LoopState {
+            bool waiting_for_sideeffect_syscall_to_finish;
+            arch_reg_content_t user_ret_val;
+        };
+
+        struct LoopState state {.waiting_for_sideeffect_syscall_to_finish = false};
 
         while (1) {
+
+            const int no_sideeffect_syscall = get_sideeffectfree_syscall_number();
 
             // Wait for syscall entry/exit event.
             // In first iteration it is an entry to 'execve'.
@@ -212,7 +251,10 @@ int main(int argc, char *argv[]) {
             struct ptrace_syscall_info syscall_info;
             ptrace(PTRACE_GET_SYSCALL_INFO, tracee_pid, sizeof(ptrace_syscall_info), &syscall_info);
             if (syscall_info.op == PTRACE_SYSCALL_INFO_NONE) {
+
+                // TODO: understand what happens here.
                 static bool if_it_happened_only_once_then_its_fine = false;
+
                 if (if_it_happened_only_once_then_its_fine) {
                     printf("syscall_info.op == PTRACE_SYSCALL_INFO_NONE happened twice!\n");
                     exit(1);
@@ -227,12 +269,16 @@ int main(int argc, char *argv[]) {
             arch_reg_content_t syscall_number = *arch_syscall_number(&user_regs);
             if (syscall_number > max_syscall_number) {
                 printf("Unexpected syscall number: 0x%llx\n", syscall_number);
-                // exit(1);
-                continue;
+                exit(1);
             }
             const char* syscall_name = syscall_names[syscall_number];
-
             auto& op = syscall_info.op;
+
+            if (state.waiting_for_sideeffect_syscall_to_finish) {
+                assert (op == PTRACE_SYSCALL_INFO_EXIT);
+                assert (*arch_syscall_number(&user_regs) == no_sideeffect_syscall);
+            }
+
             if (op == PTRACE_SYSCALL_INFO_ENTRY) {
 
                 // Check whether user has defined asstrace_<syscall_name> symbol in libfilter.so
@@ -243,18 +289,42 @@ int main(int argc, char *argv[]) {
             
                 if (invoke_mock_syscall) {
 
+                    user_requested_syscall_invocation_anyway = false;
                     fprintf(stderr, "@ %s defined (mapped to %p), passing control..\n", filter_symbol_name, user_hook);
-                    arch_reg_content_t hook_ret = invoke_syscall_mock(user_hook, syscall_num_params[syscall_number], &user_regs);
-                    OUTPUT("intercepted %s. mock returned %llu", syscall_name, hook_ret);
+                    arch_reg_content_t hook_ret = invoke_syscall_like(user_hook, syscall_num_params[syscall_number], &user_regs);
+                    OUTPUT("intercepted %s. mock returned %lld", syscall_name, hook_ret);
 
-                    // make the tracee think that it returned from real syscall.
-                    *arch_pc(&user_regs) = *arch_syscall_ret_addr(&user_regs);
+                    // In normal flow the syscall was intercepted by user library, and real syscall should not be invoked.
+                    bool skip_real_syscall = !user_requested_syscall_invocation_anyway;
+
+                    if (skip_real_syscall) {
+                        // make the tracee think that it returned from a real syscall.
+
+                       *arch_syscall_number(&user_regs) = no_sideeffect_syscall;
+
+                        state.waiting_for_sideeffect_syscall_to_finish = true;
+                        state.user_ret_val = hook_ret;
+                        // *arch_pc(&user_regs) = *arch_syscall_ret_addr(&user_regs);
+                    } else {
+                        /*
+                            NOTE:
+                            'ptrace' interface does not have a platform-agnostic way
+                            to prevent syscall from executing. We can change syscall number to execute
+                            a different one, but supported for avoiding call to any syscall at all
+                            is implemented only for x86, via 'ptrace(PTRACE_SYSEMU, ..)'.
+                            Since asstrace aims to work on any CPU platform, when the syscall is to be skipped,
+                            we just call a side-effect-free 'getpid()', as User-Mode-Linux does as well.
+                            See https://sysemu.sourceforge.net/
+                        */
+
+                       // TODO give user register tampering capabilities
+                    }
+
+                    // whatever 'skip_real_syscall' is, update tracee registers.
                     ptrace(PTRACE_SETREGS, tracee_pid, NULL, &user_regs);
-                
                 } else {
                     // don't interfere normal syscall execution. only log params.
 
-                    mark_tracee_started_syscall(syscall_number);
                     OUTPUT("%s(", syscall_name);
                     for(int i = 0; i < syscall_num_params[syscall_number]; i++) {
                         OUTPUT("0x%llx, ", arch_fun_call_param_get(&user_regs, i));
@@ -262,7 +332,13 @@ int main(int argc, char *argv[]) {
                 }
 
             } else if (op == PTRACE_SYSCALL_INFO_EXIT) {
-                mark_tracee_finished_syscall(syscall_number);
+
+                if (state.waiting_for_sideeffect_syscall_to_finish) {
+                    *arch_ret_val(&user_regs) = state.user_ret_val;
+                    ptrace(PTRACE_SETREGS, tracee_pid, NULL, &user_regs);
+                    state.waiting_for_sideeffect_syscall_to_finish = false;
+                }
+
                 OUTPUT(") = 0x%llx\n", *arch_ret_val(&user_regs));
             } else {
                 printf("PTRACE_GET_SYSCALL_INFO: Unknown op: %d\n", syscall_info.op);
