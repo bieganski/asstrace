@@ -1,11 +1,13 @@
 all: filter main
 
-main:
+gen:
 	bash ./gen_syscall_headers.sh 2>/dev/null
+
+main:
 	g++ -rdynamic -fpermissive asstrace.cc -o asstrace
 
 filter:
-	g++ -shared -fPIC -o libfilter.so filter.cc
+	g++ -shared -fPIC filter.cc -o libfilter.so
 
 run:
 	./asstrace ./libfilter.so cat asstrace.cc 2>/dev/null | head
