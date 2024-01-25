@@ -12,7 +12,7 @@ It doesn't change the binary itself, but allows for manipulating behavior of sys
 
 * legacy executable which source code is not available no longer works on modern workstations, as it assumes presence of some special files (sockets, device character special etc.). We can intercept all system calls touching that particular device and provide our own implementation that emulate the device (all the emulation is in user mode).
 
-* legacy black-box executable does not work because inside a binary there are IP address and port hardcoded, that are no longer accessible as the service moved to a different server. We can intercept network system calls that try to access non-existing address, and change it so that the new address is used.
+* legacy black-box executable does not work because inside a binary there are IP address and port hardcoded, that are no longer accessible as the service moved to a different server. We can intercept network system calls that try to access non-existing address, and change it so that the new address is used.[[sample run]](#network_forwarding-example) [[source code]](./examples/network_forwarding.cc)
 
 * black-box executable does some computation, and as a result it creates a single output file. During computation it creates lots of meaningful temporary files, but unfortunately it deletes them all before output is produced. Using `asstrace` we can intercept all `unlink` system calls and cause them to do nothing. This way no temporary files get removed! [[sample run]](#unlink-example) [[source code]](./examples/unlink.cc)
 
@@ -36,6 +36,27 @@ myuser@myhost:~/github/asstrace$ file /tmp/cckCJl7b.o
 
 We managed to prevent GCC from removing artifacts from `/tmp/` directory. [See source code](./examples/unlink.cc)
 
+# `network_forwarding` example
+
+In this example we run two processes: background `nc -l -p 8000` (server listening on `127.0.0.1:8000`), and a `echo payload | nc -N 1.1.1.1 80` that tries to connect to `1.1.1.1:80` and send it some payload.
+
+Of course there is an address mismatch, so server won't receive any data, until we tamper client execution with `asstrace`.
+
+```bash
+myuser@myhost:~$ make example_net
+g++ -rdynamic -fpermissive asstrace.cc -o asstrace
+make -C examples network_forwarding
+bash -c "nc -l -p 8000 ; echo NETCAT SERVER RECEIVED DATA!" &
+g++ -I.. -shared -fPIC network_forwarding.cc -o libnet.so
+echo "<I am the payload>" | ../asstrace ./libnet.so nc -N 1.1.1.1 80 2>/dev/null
+>> network forwarding: 1.1.1.1:80 -> 127.0.0.1:8000
+<I am the payload>
+NETCAT SERVER RECEIVED DATA!
+myuser@myhost:~$
+myuser@myhost:~$
+```
+
+With `asstrace` in the loop server successfully read the data. [See source code](./examples/network_forwarding.cc).
 
 # `to_uppercase` example
 
@@ -87,4 +108,4 @@ We provide an example user library (`libfilter.so`) that is designed to cause `c
 * If `fd` points to `<filename>` it does special action, otherwise it allows `cat` program to execute `read` as usual (it will talk to kernel as nothing happened)
 * Special action goes as follows: If this is a first `read(fd, buf, count)` to that file then open the `<filename>` itself (otherwise is is already opened), and read up to `count` bytes from it to some temporary buffer. Then transform all the ASCII characters from that buffer to uppercase, then copy it back to `cat` program address space (using helper `api_memcpy_to_tracee`). The `cat` program returns from `read` syscall, and in it's buffer it has uppercase data from `<filename>`.
 
-[See `to_uppercase` source code](./filter.cc)
+[See source code](./filter.cc)

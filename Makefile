@@ -16,3 +16,6 @@ run:
 
 example_unlink: main
 	make -C examples unlink
+
+example_net: main
+	make -C examples network_forwarding
