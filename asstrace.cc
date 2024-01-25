@@ -10,6 +10,7 @@
 #include <dlfcn.h>
 #include <string>
 #include <cstddef>
+#include <algorithm>
 
 #include "gen/syscall_names.h"
 #include "gen/syscall_num_params.h"
@@ -102,6 +103,22 @@ void api_memcpy_to_tracee(pid_t pid, void* dst_tracee, void* src_tracer, size_t 
     }
 }
 
+__attribute__((noinline, used))
+void api_memcpy_from_tracee(pid_t pid, void* dst_tracer, void* src_tracee, size_t size) {
+    // TODO - for non word-size-aligned 'count' we will write *less* bytes than expected.
+    auto word_size = sizeof(arch_reg_content_t);
+    auto iters = size / word_size;
+
+    arch_reg_content_t* dst_buf = (arch_reg_content_t*) dst_tracer;
+    arch_reg_content_t* src_buf = (arch_reg_content_t*) src_tracee;
+
+    for (int i = 0; i < iters; i++) {
+        arch_reg_content_t res = ptrace(PTRACE_PEEKTEXT, pid, src_buf, NULL);
+        dst_buf[i] = res;
+        src_buf++;
+    }
+}
+
 
 static int arch_abi_fun_call_params_order[6] = {
     offsetof(user_regs_struct, rdi),
@@ -170,9 +187,14 @@ void check_child_alive_or_exit(int status) {
         exit(exit_code);
     }
 
-    if (WIFSTOPPED(status) && ((WSTOPSIG(status) & 127) != SIGTRAP)) {
-        printf("Tracee received unexpected signal: %s (%d)\n", strsignal(WSTOPSIG(status)), WSTOPSIG(status));
-        exit(1);
+    if (WIFSTOPPED(status)) {
+        auto signal = WSTOPSIG(status) & 127;
+        std::vector<int> known_signals = {SIGTRAP, SIGCHLD};
+
+        if (std::find(known_signals.begin(), known_signals.end(), signal) == known_signals.end()) {
+            printf("Tracee received unexpected signal: %s (%d)\n", strsignal(WSTOPSIG(status)), WSTOPSIG(status));
+            exit(1);
+        }
     }
 }
 
@@ -275,15 +297,7 @@ int main(int argc, char *argv[]) {
             struct ptrace_syscall_info syscall_info;
             ptrace(PTRACE_GET_SYSCALL_INFO, tracee_pid, sizeof(ptrace_syscall_info), &syscall_info);
             if (syscall_info.op == PTRACE_SYSCALL_INFO_NONE) {
-
-                // TODO: understand what happens here.
-                static bool if_it_happened_only_once_then_its_fine = false;
-
-                if (if_it_happened_only_once_then_its_fine) {
-                    printf("syscall_info.op == PTRACE_SYSCALL_INFO_NONE happened twice!\n");
-                    exit(1);
-                }
-                if_it_happened_only_once_then_its_fine = true;
+                // non-syscall stop. probably tracee got a signal and stopped.
                 continue;
             }
 

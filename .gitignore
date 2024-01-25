@@ -1,4 +1,3 @@
 asstrace
-libfilter.so
-test
+**/*.so
 gen/*

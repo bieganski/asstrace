@@ -13,3 +13,6 @@ run:
 	./asstrace ./libfilter.so cat asstrace.cc 2>/dev/null | head
 	@echo -------------------------------------
 	./asstrace ./libfilter.so cat asstrace.cc 2>&1 >/dev/null | head
+
+example_unlink: main
+	make -C examples unlink

@@ -17,6 +17,8 @@ void api_invoke_syscall_anyway();
 
 void api_memcpy_to_tracee(pid_t pid, void* dst_tracee, void* src_tracer, size_t size);
 
+void api_memcpy_from_tracee(pid_t pid, void* dst_tracer, void* src_tracee, size_t size);
+
 /*
 If path could not be resolved, 'path_buf' will contain empty string (path_buf[0] == 0).
 path_buf must be enough to fit resolved path (probably of size PATH_MAX).
