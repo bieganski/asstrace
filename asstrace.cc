@@ -78,6 +78,30 @@ api_get_tracee_cmdline() {
     return res;
 }
 
+__attribute__((noinline, used))
+void api_resolve_fd(pid_t pid, int fd, char* path_buf) {
+    static char link_path[50] = {0};
+    snprintf(link_path, 50, "/proc/%d/fd/%d", pid, fd);
+    path_buf[0] = (char) 0;
+    realpath(link_path, path_buf);
+}
+
+__attribute__((noinline, used))
+void api_memcpy_to_tracee(pid_t pid, void* dst_tracee, void* src_tracer, size_t size) {
+    // TODO - for non word-size-aligned 'count' we will write *less* bytes than expected.
+    auto word_size = sizeof(arch_reg_content_t);
+    auto iters = size / word_size;
+
+    arch_reg_content_t* dst_buf = (arch_reg_content_t*) dst_tracee;
+    arch_reg_content_t* src_buf = (arch_reg_content_t*) src_tracer;
+
+    for (int i = 0; i < iters; i++) {
+        ptrace(PTRACE_POKETEXT, pid, dst_buf, *src_buf);
+        dst_buf++;
+        src_buf++;
+    }
+}
+
 
 static int arch_abi_fun_call_params_order[6] = {
     offsetof(user_regs_struct, rdi),
