@@ -109,3 +109,7 @@ We provide an example user library (`libfilter.so`) that is designed to cause `c
 * Special action goes as follows: If this is a first `read(fd, buf, count)` to that file then open the `<filename>` itself (otherwise is is already opened), and read up to `count` bytes from it to some temporary buffer. Then transform all the ASCII characters from that buffer to uppercase, then copy it back to `cat` program address space (using helper `api_memcpy_to_tracee`). The `cat` program returns from `read` syscall, and in it's buffer it has uppercase data from `<filename>`.
 
 [See source code](./filter.cc)
+
+# User Guide
+
+See [user guide](./USER_GUIDE.md) for more details.
