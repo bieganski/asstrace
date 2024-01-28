@@ -16,6 +16,5 @@ There are serveral functions that names start with `api_` prefix. They are defin
 `asstrace` is in early stage of development and there are many features missing.
 Below is a list with all entries possible (and often easy) to implement, but still missing:
 
-* We cannot attach to already running process (`strace -p <pid>` equivalent)
 * We can trace only single-process programs (missing `strace -f` equivalent)
 * We miss any kind of syscall logging formatting (`strace`'s params like `-e`, `-y` and many many more). I'm not sure though if I would accept such change - it's probably out of scope of `asstrace`, as for debugging `strace` should be used - `asstrace` is meant to be binary compatibility layer.
