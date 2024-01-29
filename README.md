@@ -6,7 +6,7 @@ As opposed to `strace`, `asstrace` is more of a framework tool than a debugging 
 `asstrace` is designed to **provide a convenient way of altering binary behavior and sharing it to other people**.
 
 It doesn't change the binary itself, but allows for manipulating behavior of system calls that the binary executes.
-`asstrace` is designed to work with `Linux`. For now only `x86_64` is supported, but `asstrace` is designed in a way that adding a new architecture is straightforward.
+`asstrace` is designed to work with `Linux`. Adding support for a new architecture is as simple as adding `arch/<arch name>.h` file. Currently `x86` and `RISC-V` are supported.
 
 # Example use cases
 

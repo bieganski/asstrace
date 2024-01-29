@@ -46,7 +46,30 @@ def read_1_or_2_csv(path: Path) -> tuple[dict[int | str, int]  ,  type]:
         data_type = str
     
     return dict(tokens), data_type
-    
+
+
+def left_match_on_first_col(p1: Path, p2: Path, fail_on_missing: bool) -> dict:
+    """
+    f1:
+    a,123
+
+    f2:
+    a,999
+
+    self(f1, f2):
+    123,999
+    """
+    d1, _ = read_1_or_2_csv(p1)
+    d2, _ = read_1_or_2_csv(p2)
+
+    res = dict()
+    for k, v in d1.items():
+        if k not in d2:
+            if fail_on_missing:
+                raise ValueError(f"missing key {k} in {p2}")
+            continue
+        res[v] = d2[k]
+    return res
 
 def toc(path: Path, array_name: str, comment: bool):
     """
@@ -64,6 +87,10 @@ def toc(path: Path, array_name: str, comment: bool):
     """
     tokens, ttype = read_1_or_2_csv(path)
 
+    return toc_helper(tokens=tokens, ttype=ttype, array_name=array_name, comment=comment)
+
+def toc_helper(tokens, ttype, array_name: str, comment: bool):
+    
     if ttype == str:
         tokens = dict([(v, k) for k, v in tokens.items()])
 
@@ -97,10 +124,19 @@ if __name__ == "__main__":
     toc_parser.add_argument("-a", "--array_name", default="data")
     toc_parser.add_argument("-c", "--comment", action="store_true")
 
+    match_parser = subparsers.add_parser("match")
+    match_parser.add_argument("-p1", type=Path, required=True)
+    match_parser.add_argument("-p2", type=Path, required=True)
+    match_parser.add_argument("-a", "--array_name", default="data")
+    match_parser.add_argument("-c", "--comment", action="store_true")
+
     args = vars(parser.parse_args())
     cmd = args.pop("cmd")
 
     if cmd == "toc":
         toc(**args)
+    elif cmd == "match":
+        d = left_match_on_first_col(args["p1"], args["p2"], fail_on_missing=False)
+        toc_helper(tokens=d, ttype=int, array_name=args["array_name"], comment=args["comment"])
     else:
         assert False
