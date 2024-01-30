@@ -6,14 +6,12 @@
 #include <sys/wait.h>
 #include <sys/user.h>
 #include <sys/syscall.h>
+#include <sys/uio.h>
 #include <assert.h>
 #include <dlfcn.h>
 #include <string>
 #include <cstddef>
 #include <algorithm>
-
-#include "gen/syscall_names.h"
-#include "gen/syscall_num_params.h"
 
 #define VERBOSE
 
@@ -49,6 +47,7 @@ struct ptrace_syscall_info {
 	};
 };
 #include <sys/ptrace.h>
+#include <asm/ptrace.h>
 
 // state exposed
 static pid_t tracee_pid = -1;
@@ -119,37 +118,19 @@ void api_memcpy_from_tracee(pid_t pid, void* dst_tracer, void* src_tracee, size_
     }
 }
 
-
-static int arch_abi_fun_call_params_order[6] = {
-    offsetof(user_regs_struct, rdi),
-    offsetof(user_regs_struct, rsi),
-    offsetof(user_regs_struct, rdx),
-    offsetof(user_regs_struct, rcx),
-    offsetof(user_regs_struct, r8),
-    offsetof(user_regs_struct, r9),
-};
-
-
-#define arch_fun_call_param_get(__user_regs, __i) *(arch_reg_content_t*)&(((char*) __user_regs)[arch_abi_fun_call_params_order[__i]])
-
-static arch_reg_content_t* arch_pc(struct user_regs_struct* user_regs) {
-    return &user_regs->rip;
-}
-
-static arch_reg_content_t* arch_ret_val(struct user_regs_struct* user_regs) {
-    return &user_regs->rax;
-}
-
-static arch_reg_content_t* arch_syscall_number(struct user_regs_struct* user_regs) {
-    return &user_regs->orig_rax;
-}
-
-static arch_reg_content_t* arch_syscall_ret_addr(struct user_regs_struct* user_regs) {
-    // For x86, address of instruction following SYSCALL is stored in RCX (and RFLAGS in R11).
-    // https://www.felixcloutier.com/x86/syscall
-    return &user_regs->rcx;
-}
-
+// https://stackoverflow.com/a/66249936
+#if defined(__x86_64__) || defined(_M_X64)
+    #include "arch/x86_64.h"
+    #include "gen/x86_64/syscall_names.h"
+    #include "gen/x86_64/syscall_num_params.h"
+#elif defined(__riscv__) || defined(__riscv)
+    static_assert(__riscv_xlen == 64);
+    #include "arch/riscv64.h"
+    #include "gen/riscv64/syscall_names.h"
+    #include "gen/riscv64/syscall_num_params.h"
+#else
+#error "Unknown architecture"
+#endif
 
 /*
 syscall-like is a function to pointer of signature that
@@ -209,6 +190,22 @@ int get_sideeffectfree_syscall_number() {
     }
     assert(false);
 }
+
+
+#define NT_PRSTATUS 1 // from 'man ptrace': NT_PRSTATUS (with numerical value 1)
+
+static void __ptrace_set_or_get_user_regs(pid_t pid, struct user_regs_struct* user_regs, bool set) {
+    static struct iovec io;
+    io.iov_base = user_regs;
+    io.iov_len = sizeof(struct user_regs_struct);
+
+    auto op = set ? PTRACE_SETREGSET : PTRACE_GETREGSET;
+
+    ptrace(op, pid, (void*)NT_PRSTATUS, &io);
+}
+
+#define ptrace_set_user_regs(pid, ptr) ( __ptrace_set_or_get_user_regs(pid, ptr, true) )
+#define ptrace_get_user_regs(pid, ptr) ( __ptrace_set_or_get_user_regs(pid, ptr, false) )
 
 int main(int argc, char *argv[]) {
 
@@ -283,6 +280,8 @@ int main(int argc, char *argv[]) {
 
         struct LoopState state {.waiting_for_sideeffect_syscall_to_finish = false};
 
+        arch_reg_content_t syscall_number  = -1;
+
         while (1) {
 
             const int no_sideeffect_syscall = get_sideeffectfree_syscall_number();
@@ -303,8 +302,19 @@ int main(int argc, char *argv[]) {
 
             // Get some insights into what syscall tracee entered/exited.
             struct user_regs_struct user_regs;
-            ptrace(PTRACE_GETREGS, tracee_pid, NULL, &user_regs);
-            arch_reg_content_t syscall_number = *arch_syscall_number(&user_regs);
+            ptrace_get_user_regs(tracee_pid, &user_regs);
+
+            if (syscall_info.op == PTRACE_SYSCALL_INFO_EXIT) {
+                if (syscall_number == -1) {
+                    // TODO - Should only be possible to happen in ATTACH mode in first loop iteration, to be verified.
+                    assert(false);
+                    continue;
+                }
+            } else {
+                assert (syscall_info.op == PTRACE_SYSCALL_INFO_ENTRY);
+                syscall_number = syscall_info.entry.nr;
+            }
+            
             if (syscall_number > max_syscall_number) {
                 printf("Unexpected syscall number: 0x%llx\n", syscall_number);
                 exit(1);
@@ -314,7 +324,7 @@ int main(int argc, char *argv[]) {
 
             if (state.waiting_for_sideeffect_syscall_to_finish) {
                 assert (op == PTRACE_SYSCALL_INFO_EXIT);
-                assert (*arch_syscall_number(&user_regs) == no_sideeffect_syscall);
+                assert (syscall_number == no_sideeffect_syscall);
             }
 
             if (op == PTRACE_SYSCALL_INFO_ENTRY) {
@@ -340,6 +350,8 @@ int main(int argc, char *argv[]) {
 
                        *arch_syscall_number(&user_regs) = no_sideeffect_syscall;
 
+                       syscall_number = no_sideeffect_syscall;
+
                         state.waiting_for_sideeffect_syscall_to_finish = true;
                         state.user_ret_val = hook_ret;
                         // *arch_pc(&user_regs) = *arch_syscall_ret_addr(&user_regs);
@@ -359,7 +371,8 @@ int main(int argc, char *argv[]) {
                     }
 
                     // whatever 'skip_real_syscall' is, update tracee registers.
-                    ptrace(PTRACE_SETREGS, tracee_pid, NULL, &user_regs);
+                    ptrace_set_user_regs(tracee_pid, &user_regs);
+                
                 } else {
                     // don't interfere normal syscall execution. only log params.
 
@@ -373,7 +386,7 @@ int main(int argc, char *argv[]) {
 
                 if (state.waiting_for_sideeffect_syscall_to_finish) {
                     *arch_ret_val(&user_regs) = state.user_ret_val;
-                    ptrace(PTRACE_SETREGS, tracee_pid, NULL, &user_regs);
+                    ptrace_set_user_regs(tracee_pid, &user_regs);
                     state.waiting_for_sideeffect_syscall_to_finish = false;
                 }
 
