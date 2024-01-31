@@ -1,3 +1,21 @@
+# Usage scenarios
+
+```bash
+# Spawn and trace 'head -n 1 /etc/passwd' in READ-ONLY mode (no syscalls are intercepted and mocked).
+make empty_filter # creates empty_libfilter.so
+./asstrace ./empty_libfilter.so head -n 1 /etc/passwd
+```
+
+```bash
+# Spawn and trace 'head -n 1 /etc/passwd' with user-defined mocks.
+./asstrace ./path/to/filter.so head -n 1 /etc/passwd
+```
+
+```bash
+# Trace already running `ping` program (assuming that exactly one such is running).
+./asstrace ./path/to/filter.so `pidof ping`
+```
+
 # `asstrace` internally
 `asstrace` uses [`ptrace` system call](https://man7.org/linux/man-pages/man2/ptrace.2.html) to take control over specific process (they are called 'tracer' and 'tracee' respectively). This is the main limitation that it is bound to Linux (or any OS implementing `ptrace`). Similar tools, like `gdb` or `strace` use same `ptrace` interface to gain control over process.
 
