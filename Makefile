@@ -1,13 +1,20 @@
+# To cross-compile it's enough to specify GCC compiler - includes will be resolved based on predefined compiler macros.
+# See https://stackoverflow.com/a/66249936
+
+# CXX := riscv64-linux-gnu-g++
+
+CXX := g++
+
 all: filter main
 
 gen:
 	bash ./gen_syscall_headers.sh 2>/dev/null
 
 main:
-	g++ -rdynamic -fpermissive asstrace.cc -o asstrace
+	$(CXX) -rdynamic -fpermissive asstrace.cc -o asstrace
 
 filter:
-	g++ -shared -fPIC filter.cc -o libfilter.so
+	$(CXX) -shared -fPIC filter.cc -o libfilter.so
 
 run:
 	./asstrace ./libfilter.so cat asstrace.cc 2>/dev/null | head
