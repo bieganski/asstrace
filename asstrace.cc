@@ -170,7 +170,7 @@ void check_child_alive_or_exit(int status) {
 
     if (WIFSTOPPED(status)) {
         auto signal = WSTOPSIG(status) & 127;
-        std::vector<int> known_signals = {SIGTRAP, SIGCHLD};
+        std::vector<int> known_signals = {SIGTRAP, SIGCHLD, SIGSTOP};
 
         if (std::find(known_signals.begin(), known_signals.end(), signal) == known_signals.end()) {
             printf("Tracee received unexpected signal: %s (%d)\n", strsignal(WSTOPSIG(status)), WSTOPSIG(status));
@@ -222,7 +222,7 @@ int main(int argc, char *argv[]) {
 
     // Check if command line arguments are valid.
     if (argc < 3) {
-        printf("Usage: %s <./filterlib.so> <executable>\n", argv[0]);
+        printf("Usage: %s <./filterlib.so> <pid OR executable> [executable's invocation params]\n", argv[0]);
         exit(1);
     }
 
@@ -231,6 +231,7 @@ int main(int argc, char *argv[]) {
     // that calls some API function.
     tracee_argc = argc - 2;
     tracee_argv = argv + 2; // TODO: +2 hardcoded
+    tracee_pid = atoi(argv[2]);
 
     // Try 'dlopen'.
     void* filter_lib_handle = dlopen(argv[1], RTLD_LAZY);
@@ -239,8 +240,16 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
 
+    bool no_fork_but_seize_running_process = tracee_pid > 0;
+
+    if (no_fork_but_seize_running_process) {
+        ptrace(PTRACE_ATTACH, tracee_pid, NULL, NULL); 
+    } else {
+        tracee_pid = fork();
+    }
+
     // Fork into tracer and tracee.
-    if ((tracee_pid = fork()) == 0) {
+    if (tracee_pid == 0) {
         // Child process
         if (ptrace(PTRACE_TRACEME, 0, NULL, NULL) < 0) {
             perror("ptrace"); exit(1);
@@ -251,11 +260,12 @@ int main(int argc, char *argv[]) {
     } else if (tracee_pid < 0) {
         perror("fork"); exit(1);
     } else {
-        // Parent process
-        int status;
-
-        waitpid(tracee_pid, &status, 0);
-        check_child_alive_or_exit(status);
+        
+        {
+            int status;    
+            waitpid(tracee_pid, &status, 0);
+            check_child_alive_or_exit(status);
+        }
 
         /*
         From 'man ptrace':
@@ -265,12 +275,13 @@ int main(int argc, char *argv[]) {
         PTRACE_SYSCALL_INFO_NONE unless PTRACE_O_TRACESYSGOOD
         option is set before the corresponding system call stop
         has occurred.
-
-        NOTE: we want PTRACE_O_EXITKILL set unconditionally only until we implement
-        equivalent of strace's '-p <pid>' option.
         */
-        ptrace(PTRACE_SETOPTIONS, tracee_pid, NULL, PTRACE_O_TRACESYSGOOD | PTRACE_O_EXITKILL);
-
+        {
+        int flags = PTRACE_O_TRACESYSGOOD;
+        if (!no_fork_but_seize_running_process)
+            flags |= PTRACE_O_EXITKILL;
+        ptrace(PTRACE_SETOPTIONS, tracee_pid, NULL, flags);
+        }
 
         // All dependency between consecutive iterations is stored in LoopState.
         struct LoopState {
@@ -289,8 +300,12 @@ int main(int argc, char *argv[]) {
             // Wait for syscall entry/exit event.
             // In first iteration it is an entry to 'execve'.
             ptrace(PTRACE_SYSCALL, tracee_pid, NULL, NULL);
-            waitpid(tracee_pid, &status, 0);
-            check_child_alive_or_exit(status);
+            
+            {
+                int status;
+                waitpid(tracee_pid, &status, 0);
+                check_child_alive_or_exit(status);
+            }
 
             // Syscall entered or exited?
             struct ptrace_syscall_info syscall_info;

@@ -105,8 +105,8 @@ We provide an example user library (`libfilter.so`) that is designed to cause `c
 
 * It intercepts only `read` syscalls.
 * On each `read(fd, ...)`, it checks to which file `/proc/pid/fd` points to.
-* If `fd` points to `<filename>` it does special action, otherwise it allows `cat` program to execute `read` as usual (it will talk to kernel as nothing happened)
-* Special action goes as follows: If this is a first `read(fd, buf, count)` to that file then open the `<filename>` itself (otherwise is is already opened), and read up to `count` bytes from it to some temporary buffer. Then transform all the ASCII characters from that buffer to uppercase, then copy it back to `cat` program address space (using helper `api_memcpy_to_tracee`). The `cat` program returns from `read` syscall, and in it's buffer it has uppercase data from `<filename>`.
+* If `fd` points to `<filename>` it does special action, otherwise it allows `cat` program to execute `read` as usual.
+* Special action goes as follows: If this is a first `read(fd, buf, count)` to that file then open the `<filename>` itself (otherwise is is already opened), and read up to `count` bytes from it to some temporary buffer. Then transform all the ASCII characters from that buffer to uppercase, then copy it back to tracee's (`cat`) address space (using helper `api_memcpy_to_tracee`). The `cat` program returns from `read` syscall with buffer filled with uppercase data from `<filename>`.
 
 [See source code](./filter.cc)
 

@@ -5,4 +5,5 @@ unlink:
 network_forwarding:
 	bash -c "nc -l -p 8000 ; echo NETCAT SERVER RECEIVED DATA!" &
 	g++ -I.. -shared -fPIC network_forwarding.cc -o libnet.so
+	sleep 1
 	echo "<I am the payload>" | ../asstrace ./libnet.so nc -N 1.1.1.1 80 2>/dev/null

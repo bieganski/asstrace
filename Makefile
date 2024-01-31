@@ -2,7 +2,6 @@
 # See https://stackoverflow.com/a/66249936
 
 # CXX := riscv64-linux-gnu-g++
-
 CXX := g++
 
 all: filter main
@@ -12,6 +11,9 @@ gen:
 
 main:
 	$(CXX) -rdynamic -fpermissive asstrace.cc -o asstrace
+
+empty_filter: filter
+	sed 's/asstrace_/ASSTRACE_/g' ./libfilter.so  > empty_libfilter.so
 
 filter:
 	$(CXX) -shared -fPIC filter.cc -o libfilter.so
