@@ -24,7 +24,7 @@ from_debian_base=$OUT_GEN_DIR/$OUT_SYSCALL_NUM_PARAMS_BASENAME
 # Generate (name,num_params) csv.
 $SYSCALL_TOOL list --fmt name num_params > $from_debian_base.csv
 
-for arch in x86_64 riscv64; do
+for arch in x86_64 riscv64 arm64; do
     mkdir -p $OUT_GEN_DIR/$arch
     from_python_base=$OUT_GEN_DIR/$arch/$OUT_SYSCALL_NAMES_BASENAME
 

@@ -2,7 +2,8 @@
 # See https://stackoverflow.com/a/66249936
 
 # CXX := riscv64-linux-gnu-g++
-CXX := g++
+CXX := arm-linux-gnueabihf-g++
+# CXX := g++
 
 all: filter main
 

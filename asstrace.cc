@@ -119,6 +119,7 @@ void api_memcpy_from_tracee(pid_t pid, void* dst_tracer, void* src_tracee, size_
 }
 
 // https://stackoverflow.com/a/66249936
+// to find out compiler-set defines: echo "" | arm-none-eabi-g++ -E -dM -
 #if defined(__x86_64__) || defined(_M_X64)
     #include "arch/x86_64.h"
     #include "gen/x86_64/syscall_names.h"
@@ -128,6 +129,10 @@ void api_memcpy_from_tracee(pid_t pid, void* dst_tracer, void* src_tracee, size_
     #include "arch/riscv64.h"
     #include "gen/riscv64/syscall_names.h"
     #include "gen/riscv64/syscall_num_params.h"
+#elif defined(__arm__) || defined(__ARM_ARCH)
+    #include "arch/arm64.h"
+    #include "gen/arm64/syscall_names.h"
+    #include "gen/arm64/syscall_num_params.h"
 #else
 #error "Unknown architecture"
 #endif
@@ -287,11 +292,14 @@ int main(int argc, char *argv[]) {
         struct LoopState {
             bool waiting_for_sideeffect_syscall_to_finish;
             arch_reg_content_t user_ret_val;
+            arch_reg_content_t syscall_number;
         };
 
-        struct LoopState state {.waiting_for_sideeffect_syscall_to_finish = false};
-
-        arch_reg_content_t syscall_number  = -1;
+        struct LoopState state {
+            .waiting_for_sideeffect_syscall_to_finish = false,
+            .user_ret_val = (arch_reg_content_t) -1,
+            .syscall_number = (arch_reg_content_t) -1,
+        };
 
         while (1) {
 
@@ -320,26 +328,26 @@ int main(int argc, char *argv[]) {
             ptrace_get_user_regs(tracee_pid, &user_regs);
 
             if (syscall_info.op == PTRACE_SYSCALL_INFO_EXIT) {
-                if (syscall_number == -1) {
+                if (state.syscall_number == -1) {
                     // TODO - Should only be possible to happen in ATTACH mode in first loop iteration, to be verified.
                     assert(false);
                     continue;
                 }
             } else {
                 assert (syscall_info.op == PTRACE_SYSCALL_INFO_ENTRY);
-                syscall_number = syscall_info.entry.nr;
+                state.syscall_number = syscall_info.entry.nr;
             }
             
-            if (syscall_number > max_syscall_number) {
-                printf("Unexpected syscall number: 0x%llx\n", syscall_number);
+            if (state.syscall_number > max_syscall_number) {
+                printf("Unexpected syscall number: 0x%llx\n", state.syscall_number);
                 exit(1);
             }
-            const char* syscall_name = syscall_names[syscall_number];
+            const char* syscall_name = syscall_names[state.syscall_number];
             auto& op = syscall_info.op;
 
             if (state.waiting_for_sideeffect_syscall_to_finish) {
                 assert (op == PTRACE_SYSCALL_INFO_EXIT);
-                assert (syscall_number == no_sideeffect_syscall);
+                assert (state.syscall_number == no_sideeffect_syscall);
             }
 
             if (op == PTRACE_SYSCALL_INFO_ENTRY) {
@@ -354,7 +362,7 @@ int main(int argc, char *argv[]) {
 
                     user_requested_syscall_invocation_anyway = false;
                     fprintf(stderr, "@ %s defined (mapped to %p), passing control..\n", filter_symbol_name, user_hook);
-                    arch_reg_content_t hook_ret = invoke_syscall_like(user_hook, syscall_num_params[syscall_number], &user_regs);
+                    arch_reg_content_t hook_ret = invoke_syscall_like(user_hook, syscall_num_params[state.syscall_number], &user_regs);
                     OUTPUT("intercepted %s. mock returned %lld", syscall_name, hook_ret);
 
                     // In normal flow the syscall was intercepted by user library, and real syscall should not be invoked.
@@ -365,7 +373,7 @@ int main(int argc, char *argv[]) {
 
                        *arch_syscall_number(&user_regs) = no_sideeffect_syscall;
 
-                       syscall_number = no_sideeffect_syscall;
+                       state.syscall_number = no_sideeffect_syscall;
 
                         state.waiting_for_sideeffect_syscall_to_finish = true;
                         state.user_ret_val = hook_ret;
@@ -392,7 +400,7 @@ int main(int argc, char *argv[]) {
                     // don't interfere normal syscall execution. only log params.
 
                     OUTPUT("%s(", syscall_name);
-                    for(int i = 0; i < syscall_num_params[syscall_number]; i++) {
+                    for(int i = 0; i < syscall_num_params[state.syscall_number]; i++) {
                         OUTPUT("0x%llx, ", arch_fun_call_param_get(&user_regs, i));
                     }
                 }
