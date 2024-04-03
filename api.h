@@ -1,12 +1,12 @@
-#include <vector>
+// #include <vector>
 #include <unistd.h>
-#include <string>
+// #include <string>
 
 using arch_reg_content_t = unsigned long long;
 
 pid_t api_get_tracee_pid();
 
-std::vector<std::string> api_get_tracee_cmdline();
+// std::vector<std::string> api_get_tracee_cmdline();
 
 /*
 To be called from user-provided mock to notify that despite syscall was intercepted

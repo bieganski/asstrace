@@ -9,9 +9,14 @@
 #include <sys/uio.h>
 #include <assert.h>
 #include <dlfcn.h>
-#include <string>
-#include <cstddef>
-#include <algorithm>
+// #include <string>
+#include <stdint.h>
+
+#define offsetof( type, member ) ( (size_t) &( ( (type *) 0 )->member ) )
+// #include <cstddef>
+
+
+// #include <algorithm>
 
 #define VERBOSE
 
@@ -69,14 +74,14 @@ api_get_tracee_pid() {
     return tracee_pid;
 }
 
-std::vector<std::string>
-__attribute__((noinline, used))
-api_get_tracee_cmdline() {
-    std::vector<std::string> res;
-    for(int i = 0; i < tracee_argc; i++)
-        res.push_back(std::string(tracee_argv[i]));
-    return res;
-}
+// std::vector<std::string>
+// __attribute__((noinline, used))
+// api_get_tracee_cmdline() {
+//     std::vector<std::string> res;
+//     for(int i = 0; i < tracee_argc; i++)
+//         res.push_back(std::string(tracee_argv[i]));
+//     return res;
+// }
 
 __attribute__((noinline, used))
 void api_resolve_fd(pid_t pid, int fd, char* path_buf) {
@@ -128,6 +133,10 @@ void api_memcpy_from_tracee(pid_t pid, void* dst_tracer, void* src_tracee, size_
     #include "arch/riscv64.h"
     #include "gen/riscv64/syscall_names.h"
     #include "gen/riscv64/syscall_num_params.h"
+#elif defined(__arm__) || defined(__ARM_ARCH)
+    #include "arch/arm64.h"
+    #include "gen/arm64/syscall_names.h"
+    #include "gen/arm64/syscall_num_params.h"
 #else
 #error "Unknown architecture"
 #endif
@@ -170,13 +179,30 @@ void check_child_alive_or_exit(int status) {
 
     if (WIFSTOPPED(status)) {
         auto signal = WSTOPSIG(status) & 127;
-        std::vector<int> known_signals = {SIGTRAP, SIGCHLD, SIGSTOP};
+        int known_signals[] = {SIGTRAP, SIGCHLD, SIGSTOP};
 
-        if (std::find(known_signals.begin(), known_signals.end(), signal) == known_signals.end()) {
-            printf("Tracee received unexpected signal: %s (%d)\n", strsignal(WSTOPSIG(status)), WSTOPSIG(status));
-            exit(1);
+#define UNSAFE_num_elems(__static_arr) (sizeof(__static_arr)/sizeof(__static_arr[0]))
+
+        static_assert(UNSAFE_num_elems(known_signals) == 3);
+
+        for (int i = 0; i < UNSAFE_num_elems(known_signals); i++) {
+            if (signal == known_signals[i]) {
+                return; // ok
+            }
         }
+
+        goto err;
+
+        // if (std::find(known_signals.begin(), known_signals.end(), signal) == known_signals.end()) {
+        //     printf("Tracee received unexpected signal: %s (%d)\n", strsignal(WSTOPSIG(status)), WSTOPSIG(status));
+        //     exit(1);
+        // }
+    } else {
+        return ; // ok
     }
+err:
+    printf("Tracee received unexpected signal: %s (%d)\n", strsignal(WSTOPSIG(status)), WSTOPSIG(status));
+    exit(1);
 }
 
 int get_sideeffectfree_syscall_number() {
