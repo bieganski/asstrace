@@ -111,16 +111,16 @@ void api_memcpy_to_tracee(pid_t pid, void* dst_tracee, void* src_tracer, size_t 
 __attribute__((noinline, used))
 void api_memcpy_from_tracee(pid_t pid, void* dst_tracer, void* src_tracee, size_t size) {
     // TODO - for non word-size-aligned 'count' we will write *less* bytes than expected.
-    auto word_size = sizeof(arch_reg_content_t);
+    auto word_size = 4;
     auto iters = size / word_size;
 
-    arch_reg_content_t* dst_buf = (arch_reg_content_t*) dst_tracer;
-    arch_reg_content_t* src_buf = (arch_reg_content_t*) src_tracee;
+    uint32_t* dst_buf = (uint32_t*) dst_tracer;
+    uint32_t* src_buf = (uint32_t*) src_tracee;
 
     errno = 0;
     for (int i = 0; i < iters; i++) {
-        arch_reg_content_t res = ptrace(PTRACE_PEEKTEXT, pid, src_buf, NULL);
-        // printf("%llx = ptrace(PTRACE_PEEKTEXT, %d, %p, NULL) \n", res, pid, src_buf);
+        uint32_t res = ptrace(PTRACE_PEEKTEXT, pid, src_buf, NULL);
+        printf("%lx = ptrace(PTRACE_PEEKTEXT, %d, %p, NULL) \n", res, pid, src_buf);
         if (errno) {
             printf("ptrace(PTRACE_PEEKTEXT, %d, %p, NULL) failed! errno=%d. sleep 1000 and exit.\n", pid, src_buf, errno);
             sleep(1000);
