@@ -4,7 +4,7 @@
 // #include <unistd.h>
 // #include <assert.h>
 // #include <fcntl.h>
-// #include <cstring>
+#include <string.h>
 // #include <sys/ptrace.h>
 // #include <limits.h>
 // #include <ctype.h>
@@ -21,11 +21,12 @@ long asstrace_write(unsigned int fd, char *buf, size_t count) {
         exit(1);
     }
 
-    auto my_buf = (char*) malloc(count);
+    char* my_buf = (char*) malloc(count);
 
+    printf("START MEMCPY %p\n", buf);
     api_memcpy_from_tracee(api_get_tracee_pid(), my_buf, buf, count);
 
-    printf("write detected: %s", my_buf);
+    printf("write[%d] detected: %s\n", count, my_buf);
     exit(0);
 
     return 0xdead;

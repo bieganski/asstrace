@@ -11,6 +11,7 @@
 #include <dlfcn.h>
 // #include <string>
 #include <stdint.h>
+#include <errno.h>
 
 #define offsetof( type, member ) ( (size_t) &( ( (type *) 0 )->member ) )
 // #include <cstddef>
@@ -116,8 +117,15 @@ void api_memcpy_from_tracee(pid_t pid, void* dst_tracer, void* src_tracee, size_
     arch_reg_content_t* dst_buf = (arch_reg_content_t*) dst_tracer;
     arch_reg_content_t* src_buf = (arch_reg_content_t*) src_tracee;
 
+    errno = 0;
     for (int i = 0; i < iters; i++) {
         arch_reg_content_t res = ptrace(PTRACE_PEEKTEXT, pid, src_buf, NULL);
+        // printf("%llx = ptrace(PTRACE_PEEKTEXT, %d, %p, NULL) \n", res, pid, src_buf);
+        if (errno) {
+            printf("ptrace(PTRACE_PEEKTEXT, %d, %p, NULL) failed! errno=%d. sleep 1000 and exit.\n", pid, src_buf, errno);
+            sleep(1000);
+            exit(1);
+        }
         dst_buf[i] = res;
         src_buf++;
     }
@@ -138,6 +146,8 @@ void api_memcpy_from_tracee(pid_t pid, void* dst_tracer, void* src_tracee, size_
     #include "arch/arm.h"
     #include "gen/arm/syscall_names.h"
     #include "gen/arm/syscall_num_params.h"
+
+    #define ARM_GETREGS_WORKAROUND
 #else
 #error "Unknown architecture"
 #endif
@@ -225,6 +235,8 @@ static void __ptrace_set_or_get_user_regs(pid_t pid, struct user_regs_struct* us
     static struct iovec io;
     io.iov_base = user_regs;
     io.iov_len = sizeof(struct user_regs_struct);
+
+    // printf("x0=%llx, x1=%llx, x2=%llx  \n", user_regs->regs[0], user_regs->regs[1], user_regs->regs[2]);
 
     auto op = set ? PTRACE_SETREGSET : PTRACE_GETREGSET;
 
@@ -344,7 +356,11 @@ int main(int argc, char *argv[]) {
 
             // Get some insights into what syscall tracee entered/exited.
             struct user_regs_struct user_regs;
+#ifndef ARM_GETREGS_WORKAROUND
             ptrace_get_user_regs(tracee_pid, &user_regs);
+#else
+            memcpy(user_regs.regs, syscall_info.entry.args, 6 * 8);
+#endif
 
             if (syscall_info.op == PTRACE_SYSCALL_INFO_EXIT) {
                 if (syscall_number == -1) {
