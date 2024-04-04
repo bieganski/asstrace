@@ -134,9 +134,10 @@ void api_memcpy_from_tracee(pid_t pid, void* dst_tracer, void* src_tracee, size_
     #include "gen/riscv64/syscall_names.h"
     #include "gen/riscv64/syscall_num_params.h"
 #elif defined(__arm__) || defined(__ARM_ARCH)
-    #include "arch/arm64.h"
-    #include "gen/arm64/syscall_names.h"
-    #include "gen/arm64/syscall_num_params.h"
+// TODO: probably also need to check if '__ARM_ARCH' == 7, to distinguish against aarch64
+    #include "arch/arm.h"
+    #include "gen/arm/syscall_names.h"
+    #include "gen/arm/syscall_num_params.h"
 #else
 #error "Unknown architecture"
 #endif
@@ -357,8 +358,13 @@ int main(int argc, char *argv[]) {
             }
             
             if (syscall_number > max_syscall_number) {
-                printf("Unexpected syscall number: 0x%llx\n", syscall_number);
-                exit(1);
+                printf("WARNING: Unexpected syscall number: 0x%llx\n", syscall_number);
+                /*
+                NOTE: one might consider raising an error and exiting, but I stumbled upon
+                'custom' syscalls, (not even displayed by strace, that seems to silently ignore those), for instance
+                'ARM_set_tls'. Due to that reason we continue execution.
+                */
+                continue;
             }
             const char* syscall_name = syscall_names[syscall_number];
             auto& op = syscall_info.op;
