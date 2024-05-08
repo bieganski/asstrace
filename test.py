@@ -10,7 +10,7 @@ import sys
 import os
 import time
 from types import ModuleType
-from typing import Callable
+from typing import Optional, Callable
 import platform
 from enum import Enum
 
@@ -213,7 +213,7 @@ def prepare_tracee(pid: int, no_fork_but_seize_running_process: bool):
     ptrace(PTRACE_SETOPTIONS, pid, None, flags)
 
 
-class Platform(Enum):
+class CPU_Arch(Enum):
     """
     NOTE: string value must be compatible with convention in gen/ directory.
     """
@@ -224,10 +224,40 @@ class Platform(Enum):
     unknown = "unknown"
 
 
-def system_get_architecture() -> Platform:
+def system_get_cpu_arch() -> CPU_Arch:
     machine = platform.machine()
-    return Platform(machine) # TODO: handle 'unknown'
-    
+    return CPU_Arch(machine) # TODO: handle 'unknown'
+
+
+def load_syscalls(arch : Optional[CPU_Arch] = None) -> dict[int, str]:
+    """
+    it will try to get it in various ways, with order as follows:
+    1) check if CWD/gen/ARCH/syscall_names.csv exists
+    2) download from github.com
+    """
+
+    arch = arch or system_get_cpu_arch()
+
+    ##### try locally
+    csv_to_dict = lambda lines: dict([(int(y), x) for x, y in map(lambda x: x.split(","), lines)])
+
+    local_csv = Path(f"./gen/{arch.value}/syscall_names.csv")
+    if local_csv.is_file():
+        # success.
+        return csv_to_dict(lines=local_csv.read_text().splitlines())
+
+    ##### try Internet download
+    url = f"https://raw.githubusercontent.com/bieganski/asstrace/main/gen/{arch.value}/syscall_names.csv"
+
+    import requests
+    response = requests.get(url)
+    if response.ok:
+        # success
+        return csv_to_dict(response.content.decode("ascii").splitlines())
+
+    # give up
+    raise ValueError(f"Could not find syscall name,number mapping for arch {arch.value}")
+
 if __name__ == "__main__":
     
     try:
@@ -235,6 +265,8 @@ if __name__ == "__main__":
     except ValueError:
         print(f"usage: {Path(__file__).name} <syscalls_to_be_intercepted.py> <command> [<arguments>]")
         exit(1)
+
+    arch_syscalls : dict[int, str] = load_syscalls()
 
     import_module_str = str(Path(user_hooks_py_path).relative_to(Path("."))).removesuffix(".py").replace("/", ".")
     exec(f"import {import_module_str} as __user_hook")
