@@ -219,7 +219,9 @@ user_hook_requested_syscall_invocation: bool = False
 
 def _user_api_invoke_syscall_anyway():
     global user_hook_requested_syscall_invocation
+    print("Api was", user_hook_requested_syscall_invocation)
     user_hook_requested_syscall_invocation = True
+    print("Api is", user_hook_requested_syscall_invocation)
 
 class API:
     ptrace_set_regs_arch_agnostic = ptrace_set_regs_arch_agnostic
@@ -316,7 +318,7 @@ if __name__ == "__main__":
     prepare_tracee(pid=pid, no_fork_but_seize_running_process=no_fork_but_seize_running_process)
 
     class loop_state:
-        waiting_for_sideeffect_syscall_to_finish: bool = False
+        cur_syscall_overriden_with_sideffectless: bool = False
         user_ret_val: int = 0
     
     state = loop_state()
@@ -337,6 +339,8 @@ if __name__ == "__main__":
         if syscall_info.op not in [PTRACE_SYSCALL_INFO_EXIT, PTRACE_SYSCALL_INFO_ENTRY]:
             print(f"PTRACE_GET_SYSCALL_INFO: unknown/unexpected op: {syscall_info.op}")
             continue
+
+        print(f"OP: {syscall_info.op}, {state.cur_syscall_overriden_with_sideffectless}", file=sys.stderr)
         
         if syscall_info.op == PTRACE_SYSCALL_INFO_ENTRY:
             
@@ -352,13 +356,13 @@ if __name__ == "__main__":
                 user_hook_fn = getattr(user_hook_module, user_hook_name)
                 hook_ret = user_hook_fn(*syscall_params_getter(regs))
 
-                skip_real_syscall = not user_hook_requested_syscall_invocation
+                skip_real_syscall \
+                    = state.cur_syscall_overriden_with_sideffectless \
+                    = not user_hook_requested_syscall_invocation
                 
                 if skip_real_syscall:
                     # Hook was invoked instead.
                     setattr(regs, system_abi.syscall_number, sideeffectfree_syscall)
-                    
-                    state.waiting_for_sideeffect_syscall_to_finish = True
                     state.user_ret_val = hook_ret
                 else:
                     # Need to invoke real syscall as well as already invoked user hook.
@@ -373,11 +377,11 @@ if __name__ == "__main__":
                 print(f"{syscall_name}({', '.join([hex(x) for x in syscall_info.args])}) = ", end=print_end, file=sys.stderr)
         
         elif syscall_info.op == PTRACE_SYSCALL_INFO_EXIT:
-            if state.waiting_for_sideeffect_syscall_to_finish:
+            if state.cur_syscall_overriden_with_sideffectless:
                 if not isinstance(state.user_ret_val, int):
                     raise ValueError("User hook is obliged to return integer value, if real syscall is not executed")
                 setattr(regs, system_abi.syscall_ret_val, state.user_ret_val)
-                state.waiting_for_sideeffect_syscall_to_finish = False
+            state.cur_syscall_overriden_with_sideffectless = False
             ptrace_set_regs_arch_agnostic(pid, regs)
             retval = getattr(regs, system_abi.syscall_ret_val)
             print(f"{hex(retval)}", file=sys.stderr)
