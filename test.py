@@ -10,9 +10,10 @@ import sys
 import os
 import time
 from types import ModuleType
-from typing import Optional, Callable
+from typing import Optional
 import platform
 from enum import Enum
+from dataclasses import dataclass
 
 
 logging.basicConfig(level=logging.INFO)
@@ -31,36 +32,17 @@ class ctypes_Struct_wrapper(ctypes.Structure):
 
         return (",\n".join([f"{name}={hex(value)}" for name, value in zip(names, register_values) if value != 0]))
 
-class user_regs_struct(ctypes_Struct_wrapper):
-    _fields_ = [
-        ("r15", ctypes.c_ulonglong),
-        ("r14", ctypes.c_ulonglong),
-        ("r13", ctypes.c_ulonglong),
-        ("r12", ctypes.c_ulonglong),
-        ("rbp", ctypes.c_ulonglong),
-        ("rbx", ctypes.c_ulonglong),
-        ("r11", ctypes.c_ulonglong),
-        ("r10", ctypes.c_ulonglong),
-        ("r9", ctypes.c_ulonglong),
-        ("r8", ctypes.c_ulonglong),
-        ("rax", ctypes.c_ulonglong),
-        ("rcx", ctypes.c_ulonglong),
-        ("rdx", ctypes.c_ulonglong),
-        ("rsi", ctypes.c_ulonglong),
-        ("rdi", ctypes.c_ulonglong),
-        ("orig_rax", ctypes.c_ulonglong),
-        ("rip", ctypes.c_ulonglong),
-        ("cs", ctypes.c_ulonglong),
-        ("eflags", ctypes.c_ulonglong),
-        ("rsp", ctypes.c_ulonglong),
-        ("ss", ctypes.c_ulonglong),
-        ("fs_base", ctypes.c_ulonglong),
-        ("gs_base", ctypes.c_ulonglong),
-        ("ds", ctypes.c_ulonglong),
-        ("es", ctypes.c_ulonglong),
-        ("fs", ctypes.c_ulonglong),
-        ("gs", ctypes.c_ulonglong),
-    ]
+# class user_regs_wrapper(ctypes_Struct_wrapper):
+#     def set() # TODO
+
+class x86_64_user_regs_struct(ctypes_Struct_wrapper):
+    _reg_names_ordered_ = ["r15", "r14", "r13", "r12", "rbp", "rbx", "r11", "r10", "r9", "r8", "rax", "rcx", "rdx", "rsi", "rdi", "orig_rax", "rip", "cs", "eflags", "rsp", "ss", "fs_base", "gs_base", "ds", "es", "fs", "gs"]
+    _fields_ = [(x, ctypes.c_ulonglong) for x in _reg_names_ordered_]
+
+class riscv64_user_regs_struct(ctypes_Struct_wrapper):
+    _reg_names_ordered_ = ["pc", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "s1", "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "t3", "t4", "t5", "t6"]
+    _fields_ = [(x, ctypes.c_ulonglong) for x in _reg_names_ordered_]
+
 
 class ptrace_syscall_info(ctypes_Struct_wrapper):
     _fields_ = [
@@ -114,6 +96,56 @@ SIGTRAP = 5
 SIGCHLD = 17
 SIGSTOP = 19
 
+class CPU_Arch(Enum):
+    """
+    NOTE: string value must be compatible with convention in gen/ directory.
+    """
+    x86_64 = "x86_64"
+    riscv64 = "riscv64"
+    arm = "arm"
+    aarch64 = "aarch64"
+    unknown = "unknown"
+
+
+def system_get_cpu_arch() -> CPU_Arch:
+    machine = platform.machine()
+    return CPU_Arch(machine) # TODO: handle 'unknown'
+
+
+@dataclass
+class CPU_ABI:
+    user_regs_struct_type : type[ctypes.Structure]
+    syscall_args_registers_ordered: list[str]
+    syscall_number: str
+    syscall_ret_val: str
+    syscall_ret_addr: str
+    pc: str
+
+KNOWN_ABI : dict[CPU_Arch, CPU_ABI] = {
+    CPU_Arch.x86_64: CPU_ABI(
+        user_regs_struct_type=x86_64_user_regs_struct,
+        syscall_args_registers_ordered=["rdi", "rsi", "rdx", "rcx", "r8", "r9"],
+        syscall_number="orig_rax",
+        syscall_ret_val="rax",
+        syscall_ret_addr="rcx", # For x86, address of instruction following SYSCALL is stored in RCX (and RFLAGS in R11). https://www.felixcloutier.com/x86/syscall
+        pc="rip",
+    ),
+
+    CPU_Arch.riscv64: CPU_ABI(
+        user_regs_struct_type=riscv64_user_regs_struct,
+        syscall_args_registers_ordered=[f"a{i}" for i in range(6)],
+        syscall_number="a7",
+        syscall_ret_val="a0",
+        syscall_ret_addr="ra",
+        pc="pc",
+    )
+}
+
+system_arch = system_get_cpu_arch()
+system_abi = KNOWN_ABI[system_arch]
+user_regs_struct = system_abi.user_regs_struct_type
+syscall_params_getter = lambda user_regs: [getattr(user_regs, x) for x in system_abi.syscall_args_registers_ordered]
+
 def load_maps(pid) -> list[dict]:
     handle = open('/proc/{}/maps'.format(pid), 'r')
     output = []
@@ -148,12 +180,15 @@ def system_find_self_lib(prefix: str) -> Path:
     assert len(set(matches)) == 1
     return matches[0]
 
-def run_shell(cmd: str) -> tuple[str, str]:
-    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True, universal_newlines=True)
-    stdout, stderr = process.communicate()
-    if (ecode := process.returncode):
-        raise ValueError(f"Command <{cmd}> exited with {ecode}")
-    return stdout, stderr
+libdl = ctypes.CDLL(system_find_self_lib(prefix="ld-linux"))
+libc = ctypes.CDLL(system_find_self_lib(prefix="libc"))
+
+libc.dlopen.restype = ctypes.c_void_p
+libc.dlsym.restype = ctypes.c_void_p
+libc.ptrace.restype = ctypes.c_uint64
+libc.ptrace.argtypes = [ctypes.c_uint64, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_void_p]
+ptrace = libc.ptrace
+
 
 # def write_process_memory(pid, address, size, data):
 #     bytes_buffer = ctypes.create_string_buffer('\x00'*size)
@@ -165,16 +200,6 @@ def run_shell(cmd: str) -> tuple[str, str]:
 #     )
 
 #     return bytes_transferred
-
-
-libdl = ctypes.CDLL(system_find_self_lib(prefix="ld-linux"))
-libc = ctypes.CDLL(system_find_self_lib(prefix="libc"))
-
-libc.dlopen.restype = ctypes.c_void_p
-libc.dlsym.restype = ctypes.c_void_p
-libc.ptrace.restype = ctypes.c_uint64
-libc.ptrace.argtypes = [ctypes.c_uint64, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_void_p]
-ptrace = libc.ptrace
 
 
 def _ptrace_get_or_set_regs_arch_agnostic(pid: int, ref: user_regs_struct, do_set: bool):
@@ -190,11 +215,23 @@ def ptrace_set_regs_arch_agnostic(pid: int, user_regs: user_regs_struct):
     return _ptrace_get_or_set_regs_arch_agnostic(pid=pid, ref=user_regs, do_set=True)
 
 
-def check_child_alive_or_exit(stat: tuple[int, int]):
-    """
-    'stat' is a result of os.waitpid.
-    """
+user_hook_requested_syscall_invocation: bool = False
+
+def _user_api_invoke_syscall_anyway():
+    global user_hook_requested_syscall_invocation
+    user_hook_requested_syscall_invocation = True
+
+class API:
+    ptrace_set_regs_arch_agnostic = ptrace_set_regs_arch_agnostic
+    ptrace_get_regs_arch_agnostic = ptrace_get_regs_arch_agnostic
+    invoke_syscall_anyway = _user_api_invoke_syscall_anyway
+
+
+
+def check_child_alive_or_exit(pid: int):
+    stat = os.waitpid(pid, 0)
     status = stat[1]
+
     if os.WIFEXITED(status):
         if exit_code := os.WEXITSTATUS(status):
             print(f"Child process exited with status {exit_code}")
@@ -212,21 +249,10 @@ def prepare_tracee(pid: int, no_fork_but_seize_running_process: bool):
         flags |= PTRACE_O_EXITKILL
     ptrace(PTRACE_SETOPTIONS, pid, None, flags)
 
+def get_sideeffectfree_syscall_number(arch_syscalls : dict[int, str]) -> int:
+    name = "getpid"
+    return dict((y, x) for x, y in arch_syscalls.items())[name]
 
-class CPU_Arch(Enum):
-    """
-    NOTE: string value must be compatible with convention in gen/ directory.
-    """
-    x86_64 = "x86_64"
-    riscv64 = "riscv64"
-    arm = "arm"
-    aarch64 = "aarch64"
-    unknown = "unknown"
-
-
-def system_get_cpu_arch() -> CPU_Arch:
-    machine = platform.machine()
-    return CPU_Arch(machine) # TODO: handle 'unknown'
 
 
 def load_syscalls(arch : Optional[CPU_Arch] = None) -> dict[int, str]:
@@ -270,10 +296,10 @@ if __name__ == "__main__":
 
     import_module_str = str(Path(user_hooks_py_path).relative_to(Path("."))).removesuffix(".py").replace("/", ".")
     exec(f"import {import_module_str} as __user_hook")
-    user_hook : ModuleType = globals()["__user_hook"] # make IDE happy.
-    user_hooks : list[Callable] = [x for x in dir(user_hook) if x.startswith("asstrace_")]
+    user_hook_module : ModuleType = globals()["__user_hook"] # make IDE happy.
+    user_hook_names : list[str] = [x for x in dir(user_hook_module) if x.startswith("asstrace_")]
 
-    logging.info(f"User-provided hooks: {user_hooks}")
+    logging.info(f"User-provided hooks: {user_hook_names}")
     
     process = subprocess.Popen(args)
 
@@ -281,9 +307,7 @@ if __name__ == "__main__":
 
     res = ptrace(PTRACE_ATTACH, pid, None, None)
 
-    stat = os.waitpid(pid, 0)
-
-    check_child_alive_or_exit(stat)
+    check_child_alive_or_exit(pid)
 
     # TODO - implement SEIZE mode, not only spawning new process.
     # currently only supported in asstrace.cc
@@ -291,7 +315,12 @@ if __name__ == "__main__":
 
     prepare_tracee(pid=pid, no_fork_but_seize_running_process=no_fork_but_seize_running_process)
 
-    cur_syscall: int = -1
+    class loop_state:
+        waiting_for_sideeffect_syscall_to_finish: bool = False
+        user_ret_val: int = 0
+    
+    state = loop_state()
+    sideeffectfree_syscall: int = get_sideeffectfree_syscall_number(arch_syscalls=arch_syscalls)
 
     while True:
         
@@ -299,23 +328,59 @@ if __name__ == "__main__":
         time.sleep(0.001) # TODO: othewise sometimes PTRACE_GETREGSET fails for unknown reason.
     
         regs = user_regs_struct()
+        check_child_alive_or_exit(pid)
         ptrace_get_regs_arch_agnostic(pid=pid, user_regs=regs)
-        stat = os.waitpid(pid, 0)
-        check_child_alive_or_exit(stat)
 
         syscall_info = ptrace_syscall_info()
-        ptrace(PTRACE_GET_SYSCALL_INFO, pid, ctypes.sizeof(ptrace_syscall_info), ctypes.byref(syscall_info));
+        ptrace(PTRACE_GET_SYSCALL_INFO, pid, ctypes.sizeof(ptrace_syscall_info), ctypes.byref(syscall_info))
         
-        if syscall_info.op == PTRACE_SYSCALL_INFO_NONE:
-            continue # non-syscall stop. probably tracee got a signal and stopped.
+        if syscall_info.op not in [PTRACE_SYSCALL_INFO_EXIT, PTRACE_SYSCALL_INFO_ENTRY]:
+            print(f"PTRACE_GET_SYSCALL_INFO: unknown/unexpected op: {syscall_info.op}")
+            continue
+        
+        if syscall_info.op == PTRACE_SYSCALL_INFO_ENTRY:
+            
+            syscall_name = arch_syscalls.get(syscall_info.nr, "unknown_syscall")
+
+            if (user_hook_name := f"asstrace_{syscall_name}") in user_hook_names:
+            
+                # Reset some state.
+                user_hook_requested_syscall_invocation = False
+
+                # Actually invoke user hook.
+                print(f"   @@ invoking user hook {user_hook_name}")
+                user_hook_fn = getattr(user_hook_module, user_hook_name)
+                hook_ret = user_hook_fn(*syscall_params_getter(regs))
+
+                skip_real_syscall = not user_hook_requested_syscall_invocation
+                
+                if skip_real_syscall:
+                    # Hook was invoked instead.
+                    setattr(regs, system_abi.syscall_number, sideeffectfree_syscall)
+                    
+                    state.waiting_for_sideeffect_syscall_to_finish = True
+                    state.user_ret_val = hook_ret
+                else:
+                    # Need to invoke real syscall as well as already invoked user hook.
+                    # NOTE: the hook might have tampered with registers - need to write it back
+                    pass
+                
+                # whatever 'skip_real_syscall' is, update tracee registers.
+                ptrace_set_regs_arch_agnostic(pid, regs)
+            else:
+                # don't intercept a syscall - just log invocation params.
+                print_end = '\n' if syscall_name.startswith("exit") else ''
+                print(f"{syscall_name}({', '.join([hex(x) for x in syscall_info.args])}) = ", end=print_end, file=sys.stderr)
+        
         elif syscall_info.op == PTRACE_SYSCALL_INFO_EXIT:
-            assert cur_syscall != -1  # not sure if still true in SEIZE mode.
-        elif syscall_info.op == PTRACE_SYSCALL_INFO_ENTRY:
-            cur_syscall = syscall_info.nr
-        else:
-            assert False
-        
-        print(syscall_info.op, cur_syscall, file=sys.stderr)
+            if state.waiting_for_sideeffect_syscall_to_finish:
+                if not isinstance(state.user_ret_val, int):
+                    raise ValueError("User hook is obliged to return integer value, if real syscall is not executed")
+                setattr(regs, system_abi.syscall_ret_val, state.user_ret_val)
+                state.waiting_for_sideeffect_syscall_to_finish = False
+            ptrace_set_regs_arch_agnostic(pid, regs)
+            retval = getattr(regs, system_abi.syscall_ret_val)
+            print(f"{hex(retval)}", file=sys.stderr)
 
 
     process.communicate()
