@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from test import API as api
+from asstrace import API as api
 
 INTERCEPT_PATH = Path("/sys/kernel/btf/vmlinux").absolute()
 REPLACEMENT_PATH = Path("/home/m.bieganski/vm").absolute()
