@@ -238,6 +238,8 @@ def _user_api_tracee_resolve_fd(fd: int):
     return os.readlink(f"/proc/{pid}/fd/{fd}")
 
 def _user_api_write_tracee_mem(address, data):
+    if isinstance(data, str):
+        data = bytes(data, encoding="ascii")
     return _read_or_write_process_memory(address=address, size=len(data), data=data, pid=builtins.tracee_pid, do_write=True)
 
 def _user_api_write_tracee_mem_null_terminated(address, data):
