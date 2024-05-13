@@ -10,13 +10,14 @@ import sys
 import os
 import time
 from types import ModuleType
-from typing import Optional
+from typing import Optional, Any
 import platform
 from enum import Enum
 from dataclasses import dataclass
-
-
+    
 logging.basicConfig(level=logging.INFO)
+
+# CREDITS (mostly cpython bindings): https://github.com/ancat/gremlin/blob/master/inject_so.py
 
 class ctypes_Struct_wrapper(ctypes.Structure):
 
@@ -177,30 +178,17 @@ def load_maps(pid) -> list[dict]:
 def system_find_self_lib(prefix: str) -> Path:
     regions = load_maps("self")
     matches = [r["map_name"] for r in regions if r["map_name"].name.startswith(prefix)]
-    assert len(set(matches)) == 1
+    assert len(set(matches)) == 1, set(matches)
     return matches[0]
 
 libdl = ctypes.CDLL(system_find_self_lib(prefix="ld-linux"))
-libc = ctypes.CDLL(system_find_self_lib(prefix="libc"))
+libc = ctypes.CDLL(system_find_self_lib(prefix="libc.so"))
 
 libc.dlopen.restype = ctypes.c_void_p
 libc.dlsym.restype = ctypes.c_void_p
 libc.ptrace.restype = ctypes.c_uint64
 libc.ptrace.argtypes = [ctypes.c_uint64, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_void_p]
 ptrace = libc.ptrace
-
-
-# def write_process_memory(pid, address, size, data):
-#     bytes_buffer = ctypes.create_string_buffer('\x00'*size)
-#     bytes_buffer.raw = data
-#     local_iovec  = iovec(ctypes.cast(ctypes.byref(bytes_buffer), ctypes.c_void_p), size)
-#     remote_iovec = iovec(ctypes.c_void_p(address), size)
-#     bytes_transferred = libc.process_vm_writev(
-#         pid, ctypes.byref(local_iovec), 1, ctypes.byref(remote_iovec), 1, 0
-#     )
-
-#     return bytes_transferred
-
 
 def _ptrace_get_or_set_regs_arch_agnostic(pid: int, ref: user_regs_struct, do_set: bool):
     op = PTRACE_SETREGSET if do_set else PTRACE_GETREGSET
@@ -214,19 +202,113 @@ def ptrace_get_regs_arch_agnostic(pid: int, user_regs: user_regs_struct):
 def ptrace_set_regs_arch_agnostic(pid: int, user_regs: user_regs_struct):
     return _ptrace_get_or_set_regs_arch_agnostic(pid=pid, ref=user_regs, do_set=True)
 
-
-user_hook_requested_syscall_invocation: bool = False
+# https://stackoverflow.com/a/142566
+# the problem: allow importee to change importer's global variable.
+import builtins
+if __name__ == "__main__":
+    builtins.user_hook_requested_syscall_invocation = False
+    builtins.tracee_pid = -1
 
 def _user_api_invoke_syscall_anyway():
-    global user_hook_requested_syscall_invocation
-    print("Api was", user_hook_requested_syscall_invocation)
-    user_hook_requested_syscall_invocation = True
-    print("Api is", user_hook_requested_syscall_invocation)
+    builtins.user_hook_requested_syscall_invocation = True
+
+def _user_api_get_tracee_pid():
+    return builtins.tracee_pid
+
+def _read_or_write_process_memory(address, size, data, pid: int, do_write: bool):
+    assert pid > 0
+    bytes_buffer = ctypes.create_string_buffer(size)
+    bytes_buffer.raw = data
+    local_iovec  = iovec(ctypes.cast(ctypes.byref(bytes_buffer), ctypes.c_void_p), size)
+    remote_iovec = iovec(ctypes.c_void_p(address), size)
+    f = libc.process_vm_writev if do_write else libc.process_vm_readv
+    bytes_transferred = f(
+        pid, ctypes.byref(local_iovec), 1, ctypes.byref(remote_iovec), 1, 0
+    )
+
+    if do_write:
+        return bytes_transferred
+    return bytes_buffer.raw
+
+def resolve_fd(fd: int, pid: int):
+    return os.readlink(f"/proc/{pid}/{fd}")
+
+def _user_api_tracee_resolve_fd(fd: int):
+    pid = builtins.tracee_pid
+    return os.readlink(f"/proc/{pid}/fd/{fd}")
+
+def _user_api_write_tracee_mem(address, data):
+    return _read_or_write_process_memory(address=address, size=len(data), data=data, pid=builtins.tracee_pid, do_write=True)
+
+def _user_api_write_tracee_mem_null_terminated(address, data):
+    new_data = bytearray(data)
+    new_data.append(0x0)
+    return _read_or_write_process_memory(address=address, size=len(new_data), data=new_data, pid=builtins.tracee_pid, do_write=True)
+
+def _user_api_read_tracee_mem(address, size):
+    return _read_or_write_process_memory(address=address, size=size, data=bytes(), pid=builtins.tracee_pid, do_write=False)
+
+def _user_api_read_tracee_mem_null_terminated(address, size):
+    data =  _read_or_write_process_memory(address=address, size=size, data=bytes(), pid=builtins.tracee_pid, do_write=False)
+    return data[0:data.index(0)]
+
+
+def patch_tracee_syscall_params(*args, **kwargs):
+    if args:
+        raise ValueError("positional arguments not allowed!")
+    
+    # cursed code that finds out what user meant by e.g. setting fd=3 (to understand that fd stands for first argument of syscall).
+    import inspect, gc
+    caller_frame = inspect.stack()[1].frame
+    code_obj = caller_frame.f_code
+    referrers = gc.get_referrers(code_obj)
+    assert len(referrers) == 1, referrers
+    caller = referrers[0]
+
+    # expect caller to be user hook. 
+    assert caller.__name__.startswith("asstrace"), caller.__name__
+    caller_signature = inspect.signature(caller)
+
+    caller_arguments_ordered : list[str] = list(caller_signature.parameters.keys())
+    
+    # create a [int, int_castable] dict, whose keys directly map to registers to be written by 'ptrace'.
+    try:
+        final = dict()
+        for str_k, v in kwargs.items():
+            k = caller_arguments_ordered.index(str_k)
+            final[k] = v
+    except ValueError:
+        raise ValueError(f"Possible values are {caller_arguments_ordered}, not '{str_k}'")
+    
+    # try int_castable -> int.
+    try:
+        for k, v in final.items():
+            final[k] = int(v)
+    except ValueError:
+        raise ValueError(f"Only int-castable values are allowed, not {type(v)} ({v})")
+    
+
+    def update_user_regs_inplace(abi: CPU_ABI, patch: dict[int, int], user_regs: user_regs_struct):
+        for k, v in patch.items():
+            assert k < 6
+            cpu_reg_name = abi.syscall_args_registers_ordered[k]
+            setattr(user_regs, cpu_reg_name, v)
+    
+    update_user_regs_inplace(abi=system_abi, patch=final, user_regs=builtins.tracee_regs)
+
+
 
 class API:
     ptrace_set_regs_arch_agnostic = ptrace_set_regs_arch_agnostic
     ptrace_get_regs_arch_agnostic = ptrace_get_regs_arch_agnostic
     invoke_syscall_anyway = _user_api_invoke_syscall_anyway
+    get_tracee_pid = _user_api_get_tracee_pid
+    ptrace_write_mem = _user_api_write_tracee_mem
+    ptrace_write_mem_null_terminated = _user_api_write_tracee_mem_null_terminated
+    ptrace_read_mem = _user_api_read_tracee_mem
+    ptrace_read_null_terminated = _user_api_read_tracee_mem_null_terminated
+    tracee_resolve_fd = _user_api_tracee_resolve_fd
+    patch_tracee_syscall_params = patch_tracee_syscall_params
 
 
 
@@ -305,7 +387,7 @@ if __name__ == "__main__":
     
     process = subprocess.Popen(args)
 
-    pid = process.pid
+    pid = builtins.tracee_pid = process.pid
 
     res = ptrace(PTRACE_ATTACH, pid, None, None)
 
@@ -329,7 +411,7 @@ if __name__ == "__main__":
         ptrace(PTRACE_SYSCALL, pid, None, None)
         time.sleep(0.001) # TODO: othewise sometimes PTRACE_GETREGSET fails for unknown reason.
     
-        regs = user_regs_struct()
+        regs = builtins.tracee_regs = user_regs_struct()
         check_child_alive_or_exit(pid)
         ptrace_get_regs_arch_agnostic(pid=pid, user_regs=regs)
 
@@ -340,25 +422,24 @@ if __name__ == "__main__":
             print(f"PTRACE_GET_SYSCALL_INFO: unknown/unexpected op: {syscall_info.op}")
             continue
 
-        print(f"OP: {syscall_info.op}, {state.cur_syscall_overriden_with_sideffectless}", file=sys.stderr)
-        
         if syscall_info.op == PTRACE_SYSCALL_INFO_ENTRY:
+
+            # Reset some state.
+            builtins.user_hook_requested_syscall_invocation = False
+            state.cur_syscall_overriden_with_sideffectless
             
             syscall_name = arch_syscalls.get(syscall_info.nr, "unknown_syscall")
 
             if (user_hook_name := f"asstrace_{syscall_name}") in user_hook_names:
-            
-                # Reset some state.
-                user_hook_requested_syscall_invocation = False
 
                 # Actually invoke user hook.
-                print(f"   @@ invoking user hook {user_hook_name}")
+                print(f"\033[1m{user_hook_name}\033[0m")
                 user_hook_fn = getattr(user_hook_module, user_hook_name)
                 hook_ret = user_hook_fn(*syscall_params_getter(regs))
 
                 skip_real_syscall \
                     = state.cur_syscall_overriden_with_sideffectless \
-                    = not user_hook_requested_syscall_invocation
+                    = not builtins.user_hook_requested_syscall_invocation
                 
                 if skip_real_syscall:
                     # Hook was invoked instead.
