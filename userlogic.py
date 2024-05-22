@@ -5,13 +5,11 @@ from asstrace import API as api, system_get_cpu_arch, CPU_Arch
 
 if system_get_cpu_arch() == CPU_Arch.riscv64:
     intercept_replacement_pairs = [
-        ("/sys/kernel/btf/vmlinux", "/root/vm"),
-        ("/sys/kernel/debug/tracing/events/syscalls/sys_enter_openat/id", "/dev/null"),
-        ("/sys/kernel/debug/tracing/events/syscalls/sys_exit_openat/id", "/dev/null"),
+        ("/sys/kernel/btf/vmlinux", "/root/asstrace/vm"),
     ]
 elif system_get_cpu_arch() == CPU_Arch.x86_64:
     intercept_replacement_pairs = [
-        ("/sys/kernel/btf/vmlinux", "/home/m.bieganski/vm"),
+        # ("/sys/kernel/btf/vmlinux", "/home/m.bieganski/vm"),
     ]
 
 for i, (a, b) in enumerate(intercept_replacement_pairs):
@@ -41,34 +39,36 @@ AT_FDCWD_LOWER_4BYTES = 0xffffff9c
 
 first = True
 
-def asstrace_read(fd, buf, size, *args):
-    global first
-    path = api.tracee_resolve_fd(fd)
-    if "/dev/null" in path:
-        print("AAAAAAAAAAAAAAAAAAAAAAAAAAA")
-    else:
-        api.invoke_syscall_anyway()
-        return
-    if first:
+# def asstrace_read(fd, buf, size, *args):
+#     global first
+#     path = api.tracee_resolve_fd(fd)
+#     if "/dev/null" in path:
+#         print("AAAAAAAAAAAAAAAAAAAAAAAAAAA")
+#     else:
+#         api.invoke_syscall_anyway()
+#         return
+#     if first:
 
-        api.ptrace_write_mem(buf, "666\n")
-        first = False
-        return 4
-    else:
-        return 0
+#         api.ptrace_write_mem(buf, "666\n")
+#         first = False
+#         return 4
+#     else:
+#         return 0
     
 
 def generic_proxy(dfd, filename, mode):
     assert not ((dfd & 0xffff_ffff) ^ AT_FDCWD_LOWER_4BYTES)
     path = api.ptrace_read_null_terminated(filename, 1024).decode("ascii")
     path = Path(path).absolute()
-    print(f"generic_proxy: {path}, mode:{mode}")
+    # print(f"generic_proxy: {path}, mode:{mode}")
     if path not in intercept_replacement_pairs:
         api.invoke_syscall_anyway()
-        print(f"generic_proxy: no replacement found.")
+        # print(f"generic_proxy: no replacement found.")
         return
     replacement = intercept_replacement_pairs[path]
-    print(f"generic_proxy: replacement {replacement}")
+    print(f">> generic_proxy: replacement {replacement}")
+    if not Path(replacement).exists():
+        raise ValueError(f"{replacement} does not exist! TODO: error might be false, if tracee is in different FS namespace.")
     api.ptrace_write_mem_null_terminated(filename, bytes(str(replacement), encoding="ascii"))
     api.invoke_syscall_anyway()
 

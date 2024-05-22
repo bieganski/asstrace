@@ -340,6 +340,12 @@ def get_sideeffectfree_syscall_number(arch_syscalls : dict[int, str]) -> int:
     return dict((y, x) for x, y in arch_syscalls.items())[name]
 
 
+def run_shell(cmd: str) -> tuple[str, str]:
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True, universal_newlines=True)
+    stdout, stderr = process.communicate()
+    if (ecode := process.returncode):
+        raise ValueError(f"Command <{cmd}> exited with {ecode}")
+    return stdout, stderr
 
 def load_syscalls(arch : Optional[CPU_Arch] = None) -> dict[int, str]:
     """
@@ -361,11 +367,18 @@ def load_syscalls(arch : Optional[CPU_Arch] = None) -> dict[int, str]:
     ##### try Internet download
     url = f"https://raw.githubusercontent.com/bieganski/asstrace/main/gen/{arch.value}/syscall_names.csv"
 
-    import requests
-    response = requests.get(url)
-    if response.ok:
-        # success
-        return csv_to_dict(response.content.decode("ascii").splitlines())
+    try:
+        import requests
+        response = requests.get(url)
+        if response.ok:
+            # success
+            lines = response.content.decode("ascii").splitlines()
+    except ModuleNotFoundError:
+        # NOTE: 'requests' is not a part of standard library.
+        content, _ = run_shell(f"curl -L  {url}")
+        lines = content.splitlines()
+    finally:
+        return csv_to_dict(lines)
 
     # give up
     raise ValueError(f"Could not find syscall name,number mapping for arch {arch.value}")
@@ -380,7 +393,10 @@ if __name__ == "__main__":
 
     arch_syscalls : dict[int, str] = load_syscalls()
 
-    import_module_str = str(Path(user_hooks_py_path).relative_to(Path("."))).removesuffix(".py").replace("/", ".")
+    import sys
+    user_hook_abs = Path(user_hooks_py_path).absolute()
+    sys.path.append(str(user_hook_abs.parent))
+    import_module_str = user_hook_abs.name.removesuffix(".py").replace("/", ".")
     exec(f"import {import_module_str} as __user_hook")
     user_hook_module : ModuleType = globals()["__user_hook"] # make IDE happy.
     user_hook_names : list[str] = [x for x in dir(user_hook_module) if x.startswith("asstrace_")]
