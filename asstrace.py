@@ -359,7 +359,7 @@ def load_syscalls(arch : Optional[CPU_Arch] = None) -> dict[int, str]:
     ##### try locally
     csv_to_dict = lambda lines: dict([(int(y), x) for x, y in map(lambda x: x.split(","), lines)])
 
-    local_csv = Path(f"./gen/{arch.value}/syscall_names.csv")
+    local_csv = Path(__file__).parent / "gen" / arch.value/ "syscall_names.csv"
     if local_csv.is_file():
         # success.
         return csv_to_dict(lines=local_csv.read_text().splitlines())
@@ -367,17 +367,10 @@ def load_syscalls(arch : Optional[CPU_Arch] = None) -> dict[int, str]:
     ##### try Internet download
     url = f"https://raw.githubusercontent.com/bieganski/asstrace/main/gen/{arch.value}/syscall_names.csv"
 
-    try:
-        import requests
-        response = requests.get(url)
-        if response.ok:
-            # success
-            lines = response.content.decode("ascii").splitlines()
-    except ModuleNotFoundError:
-        # NOTE: 'requests' is not a part of standard library.
-        content, _ = run_shell(f"curl -L  {url}")
-        lines = content.splitlines()
-    finally:
+    import requests
+    response = requests.get(url)
+    if response.ok:
+        lines = response.content.decode("ascii").splitlines()
         return csv_to_dict(lines)
 
     # give up
