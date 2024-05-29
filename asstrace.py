@@ -446,29 +446,40 @@ known_expressions = {
     "exit": ExitCmd,
 }
 
-def filepath_subst_factory(subst_map: dict[Path, Path]):
-    def just_subst_filepath(dfd, filename, mode):
-        # empirically checked, that AT_FDCWD is 
-        # 0xffffffffffffff9c on risc-v , 0xffffff9c on x86_64 for some reason.
-        AT_FDCWD_LOWER_4BYTES = 0xffffff9c
+@dataclass
+class PathSubstCmd(Cmd):
+    old: str
+    new: str
+    
+    def _function(self, old: str, new: str):
+        def just_subst_filepath(dfd, filename, mode):
+            # empirically checked, that AT_FDCWD is 
+            # 0xffffffffffffff9c on risc-v , 0xffffff9c on x86_64 for some reason.
+            AT_FDCWD_LOWER_4BYTES = 0xffffff9c
 
-        assert not ((dfd & 0xffff_ffff) ^ AT_FDCWD_LOWER_4BYTES)
-        path = API.ptrace_read_null_terminated(filename, 1024).decode("ascii")
-        path = Path(path).absolute()
-        if path not in subst_map:
+            assert not ((dfd & 0xffff_ffff) ^ AT_FDCWD_LOWER_4BYTES)
+            path = API.ptrace_read_null_terminated(filename, 1024).decode("ascii")
+            path = Path(path).absolute()
+            # if path not in subst_map:
+            if path != Path(old).absolute():
+                API.invoke_syscall_anyway()
+                return
+            # replacement = subst_map[path]
+            replacement = Path(new).absolute()
+            print(f">> just_subst_filepath: {replacement}")
+            if not Path(replacement).exists():
+                raise ValueError(f"{replacement} does not exist! TODO: error might be false, if tracee is in different FS namespace.")
+            API.ptrace_write_mem_null_terminated(filename, bytes(str(replacement), encoding="ascii"))
             API.invoke_syscall_anyway()
-            return
-        replacement = subst_map[path]
-        print(f">> just_subst_filepath: {replacement}")
-        if not Path(replacement).exists():
-            raise ValueError(f"{replacement} does not exist! TODO: error might be false, if tracee is in different FS namespace.")
-        API.ptrace_write_mem_null_terminated(filename, bytes(str(replacement), encoding="ascii"))
-        API.invoke_syscall_anyway()
-    return just_subst_filepath
+        return just_subst_filepath
 
-known_builtins = {
+from functools import partial # XXX
+
+known_builtin_expr_grups = {
     "vmlinux": {
-        ""
+        "openat": partial(PathSubstCmd, old="/sys/kernel/btf/vmlinux"),
+        "open": partial(ExitCmd, msg="'open' was not expected, rather 'openat'"),
+        # "faccessat2": PathSubstCmd,
     }
 }
 
@@ -486,7 +497,7 @@ if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("-ex", "--expressions", nargs="+", help="try 'asstrace.py -ex help' to list all available commands")
     parser.add_argument("-x", "--batch", type=Path)
-    # parser.add_argument("-b", "--builtins", nargs="+")
+    parser.add_argument("-g", "--groups", nargs="+")
     parser.add_argument("argv", nargs="+")
     
     # 'user_hooks' is an union of all user-provided commands, either -x, -ex or -b.
@@ -513,13 +524,18 @@ if __name__ == "__main__":
             assert syscall not in user_hooks
             user_hooks[syscall] = cmd()
 
-    # if bs := args.builtins:
-    #     if "help" in bs:
-    #         print("XXX help")
-    #         exit(0)
-    #     # -b 
-    #     pass
-    # raise ValueError(user_hooks)
+    if groups := args.groups:
+        if "help" in groups:
+            print(", ".join(known_builtin_expr_grups.keys()))
+            exit(0)
+        for g in groups:
+            if not g in known_builtin_expr_grups:
+                print(f"unknown group '{g}'. try 'asstrace.py -g help'", file=sys.stderr)
+            g = known_builtin_expr_grups[g]
+            for syscall, cmd in g.items():
+                assert syscall not in user_hooks
+                user_hooks[syscall] = cmd()
+        pass
 
     
     process = subprocess.Popen(args.argv)
