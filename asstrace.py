@@ -14,7 +14,7 @@ from typing import Optional, Any, Callable, Type
 import platform
 from enum import Enum
 from dataclasses import dataclass, _MISSING_TYPE
-
+from functools import partial
 
 logging.basicConfig(level=logging.INFO)
 
@@ -415,10 +415,10 @@ def deserialize_ex(s: str, known_cmds: dict[str, Type[Cmd]]) -> tuple[str, Cmd]:
 @dataclass
 class SleepCmd(Cmd):
     time: int
-    def _function(self, time: int):
+    def _function(self):
         def aux(*_):
             import time as time_module
-            time_module.sleep(time)
+            time_module.sleep(self.time)
             return 0
         return aux
 
@@ -433,10 +433,10 @@ class NopCmd(Cmd):
 @dataclass
 class ExitCmd(Cmd):
     msg : str = ""
-    def _function(self, msg):
+    def _function(self):
         def aux(*_):
-            if msg:
-                print(msg)
+            if self.msg:
+                print(self.msg)
             exit(0)
         return aux
 
@@ -451,8 +451,8 @@ class PathSubstCmd(Cmd):
     old: str
     new: str
     
-    def _function(self, old: str, new: str):
-        def just_subst_filepath(dfd, filename, mode):
+    def _function(self):
+        def just_subst_filepath(dfd, filename, mode, *_):
             # empirically checked, that AT_FDCWD is 
             # 0xffffffffffffff9c on risc-v , 0xffffff9c on x86_64 for some reason.
             AT_FDCWD_LOWER_4BYTES = 0xffffff9c
@@ -461,11 +461,11 @@ class PathSubstCmd(Cmd):
             path = API.ptrace_read_null_terminated(filename, 1024).decode("ascii")
             path = Path(path).absolute()
             # if path not in subst_map:
-            if path != Path(old).absolute():
+            if path != Path(self.old).absolute():
                 API.invoke_syscall_anyway()
                 return
             # replacement = subst_map[path]
-            replacement = Path(new).absolute()
+            replacement = Path(self.new).absolute()
             print(f">> just_subst_filepath: {replacement}")
             if not Path(replacement).exists():
                 raise ValueError(f"{replacement} does not exist! TODO: error might be false, if tracee is in different FS namespace.")
@@ -473,15 +473,17 @@ class PathSubstCmd(Cmd):
             API.invoke_syscall_anyway()
         return just_subst_filepath
 
-from functools import partial # XXX
+filesubst_factory = lambda old, new: {
+    "open":       partial(ExitCmd, msg="'open' was not expected, rather 'openat'"),
+    "openat":     partial(PathSubstCmd, old=old, new=new),
+    "faccessat2": partial(PathSubstCmd, old=old, new=new),
+}
 
 known_builtin_expr_grups = {
-    "vmlinux": {
-        "openat": partial(PathSubstCmd, old="/sys/kernel/btf/vmlinux"),
-        "open": partial(ExitCmd, msg="'open' was not expected, rather 'openat'"),
-        # "faccessat2": PathSubstCmd,
-    }
+    "filesubst": filesubst_factory,
+    "vmlinux": partial(filesubst_factory, old="/sys/kernel/btf/vmlinux"),
 }
+
 
 if __name__ == "__main__":
 
@@ -528,14 +530,20 @@ if __name__ == "__main__":
         if "help" in groups:
             print(", ".join(known_builtin_expr_grups.keys()))
             exit(0)
-        for g in groups:
-            if not g in known_builtin_expr_grups:
-                print(f"unknown group '{g}'. try 'asstrace.py -g help'", file=sys.stderr)
-            g = known_builtin_expr_grups[g]
+        for gname_and_params in groups:
+            # TODO try ./asstrace.py -ex close:sleep,time=1 -- ls
+            gname, params = gname_and_params.split(":") # TODO tu jestem
+            if not gname in known_builtin_expr_grups:
+                print(f"unknown group '{gname}'. try 'asstrace.py -g help'", file=sys.stderr)
+            g = known_builtin_expr_grups[gname]
+            assert isinstance(g, (Callable, dict))
+            if isinstance(g, Callable):
+                g = g(**dict([x.split("=") for x in params.split(",")]))
             for syscall, cmd in g.items():
                 assert syscall not in user_hooks
                 user_hooks[syscall] = cmd()
         pass
+    # raise ValueError(user_hooks)
 
     
     process = subprocess.Popen(args.argv)
