@@ -10,11 +10,22 @@ import sys
 import os
 import time
 from types import ModuleType
-from typing import Optional, Any
+from typing import Optional, Any, Callable, Type
 import platform
 from enum import Enum
-from dataclasses import dataclass
+from dataclasses import dataclass, _MISSING_TYPE
+
+class Color(Enum):
+    bold = "\033[1m"
+    reset_bold = "\033[0m"
     
+    def __str__(self) -> str:
+        """
+        emulates StrEnum for f-strings (that call __str__ under the hood)
+        """
+        return str(self.value)
+
+
 logging.basicConfig(level=logging.INFO)
 
 # CREDITS (mostly cpython bindings): https://github.com/ancat/gremlin/blob/master/inject_so.py
@@ -373,11 +384,129 @@ def load_syscalls(arch : Optional[CPU_Arch] = None) -> dict[int, str]:
         lines = response.content.decode("ascii").splitlines()
         return csv_to_dict(lines)
 
-    # give up
     raise ValueError(f"Could not find syscall name,number mapping for arch {arch.value}")
 
-if __name__ == "__main__":
+
+@dataclass
+class Cmd():
+    def __post_init__(self):
+        if self.__class__ == Cmd:
+            raise TypeError("Cannot instantiate abstract class.")
+    def __call__(self):
+        assert getattr(self, "_function", None)
+        return self._function()
+        # keys = self.__dataclass_fields__.keys()
+        # return self._function(**dict(((k, getattr(self, k)) for k in keys)))
+
+def deserialize_ex(s: str, known_cmds: dict[str, Type[Cmd]]) -> tuple[str, Cmd]:
+    # close:sleep[:time=10,x=y,...]
+    try:
+        syscall, cmd, *maybe_params = s.split(":")
+        params = deserialize_kwargs("" if not len(maybe_params) else maybe_params[0])
+        
+        cmd_type : Type = known_cmds[cmd]
+
+        for field in cmd_type.__dataclass_fields__.values():
+            assert field.type in [str, int]
+            if field.name not in params:
+                if isinstance(field.default, _MISSING_TYPE):
+                    raise ValueError(f"field '{field.name}' missing during '{cmd}' initialization (and doesn't have default value)")
+            else:
+                res = params[field.name]
+                if field.type is int:
+                    res = int(res)
+                params[field.name] = res
+        return syscall, known_cmds[cmd](**params)
+    except Exception as e:
+        print(f"deserialization of string '{s}' failed: {e}", file=sys.stderr)
+        exit(1)
+
+@dataclass
+class SleepCmd(Cmd):
+    time: int
+    def _function(self):
+        def aux(*_):
+            import time as time_module
+            time_module.sleep(self.time)
+            return 0
+        return aux
+
+@dataclass
+class NopCmd(Cmd):
+    def _function(self):
+        def aux(*_):
+            print(f"nop")
+            return 0
+        return aux
+
+@dataclass
+class ExitCmd(Cmd):
+    msg : str = ""
+    def _function(self):
+        def aux(*_):
+            if self.msg:
+                print(self.msg)
+            exit(0)
+        return aux
+
+known_expressions = {
+    "sleep": SleepCmd,
+    "nop": NopCmd,
+    "exit": ExitCmd,
+}
+
+@dataclass
+class PathSubstCmd(Cmd):
+    old: str
+    new: str
     
+    def _function(self):
+        def just_subst_filepath(dfd, filename, mode, *_):
+            # empirically checked, that AT_FDCWD is 
+            # 0xffffffffffffff9c on risc-v , 0xffffff9c on x86_64 for some reason.
+            AT_FDCWD_LOWER_4BYTES = 0xffffff9c
+
+            assert not ((dfd & 0xffff_ffff) ^ AT_FDCWD_LOWER_4BYTES)
+            
+            path_extractor = lambda pth: Path(pth).expanduser().absolute()
+
+            tracee_requested_path = API.ptrace_read_null_terminated(filename, 1024).decode("ascii")
+            
+            path, old, new = map(path_extractor, [tracee_requested_path, self.old, self.new])
+            
+            if path != old:
+                # user opens file that is out of scope of our tampering
+                API.invoke_syscall_anyway()
+                return
+            print(f"{Color.bold}{old} -> {new}{Color.reset_bold}")
+            if not new.exists():
+                raise ValueError(f"{new} does not exist! TODO: error might be false, if tracee is in different FS namespace.")
+            API.ptrace_write_mem_null_terminated(filename, bytes(str(new), encoding="ascii"))
+            API.invoke_syscall_anyway()
+        return just_subst_filepath
+
+filesubst_factory = lambda old, new: {
+    "open":       ExitCmd(msg="'open' was not expected, rather 'openat'"),
+    "openat":     PathSubstCmd(old=old, new=new),
+    "faccessat2": PathSubstCmd(old=old, new=new),
+}
+
+builtin_groups = {
+    "filesubst": filesubst_factory,
+    "vmlinux": lambda new: filesubst_factory(old="/sys/kernel/btf/vmlinux", new=new),
+}
+
+def deserialize_kwargs(s: str) -> dict[str, str]:
+    assert isinstance(s, str)
+    return dict() if not s else dict([x.split("=") for x in s.split(",")])
+
+def signature_get_arguments(f: Callable) -> list[str]:
+    import inspect
+    signature = inspect.signature(f)
+    return [param.name for param in signature.parameters.values()]
+
+if __name__ == "__main__":
+
     try:
         _, user_hooks_py_path, *args = sys.argv
     except ValueError:
@@ -386,17 +515,61 @@ if __name__ == "__main__":
 
     arch_syscalls : dict[int, str] = load_syscalls()
 
-    import sys
-    user_hook_abs = Path(user_hooks_py_path).absolute()
-    sys.path.append(str(user_hook_abs.parent))
-    import_module_str = user_hook_abs.name.removesuffix(".py").replace("/", ".")
-    exec(f"import {import_module_str} as __user_hook")
-    user_hook_module : ModuleType = globals()["__user_hook"] # make IDE happy.
-    user_hook_names : list[str] = [x for x in dir(user_hook_module) if x.startswith("asstrace_")]
-
-    logging.info(f"User-provided hooks: {user_hook_names}")
+    from argparse import ArgumentParser
+    parser = ArgumentParser()
+    parser.add_argument("-ex", "--expressions", nargs="+", help="try 'asstrace.py -ex help' to list all available commands")
+    parser.add_argument("-x", "--batch", type=Path)
+    parser.add_argument("-g", "--groups", nargs="+")
+    parser.add_argument("-q", "--quiet", action="store_true")
+    parser.add_argument("argv", nargs="+")
     
-    process = subprocess.Popen(args)
+    # 'user_hooks' is an union of all user-provided commands, either -x, -ex or -b.
+    user_hooks: dict[str, Callable] = dict()
+
+    args = parser.parse_args()
+
+    if args.batch:
+        user_hook_abs = args.batch.absolute()
+        sys.path.append(str(user_hook_abs.parent))
+        import_module_str = user_hook_abs.name.removesuffix(".py").replace("/", ".")
+        exec(f"import {import_module_str} as __user_hook")
+        user_hook_module : ModuleType = globals()["__user_hook"] # make IDE happy.
+        user_hook_names : list[str] = [x.replace("asstrace_", "") for x in dir(user_hook_module) if x.startswith("asstrace_")]
+        logging.info(f"User-provided hooks: {user_hook_names}")
+        for name in user_hook_names:
+            assert name not in user_hooks
+            user_hooks[name] = getattr(user_hook_module, f"asstrace_{name}")
+        del user_hook_abs, import_module_str, user_hook_module, user_hook_names
+    
+    if exs := args.expressions:
+        for e in exs:
+            syscall, cmd = deserialize_ex(e, known_cmds=known_expressions)
+            assert syscall not in user_hooks
+            user_hooks[syscall] = cmd()
+
+    if groups := args.groups:
+        if "help" in groups:
+            print(", ".join(builtin_groups.keys()))
+            exit(0)
+        for gname_and_params in groups:
+            gname, *params_or_empty = gname_and_params.split(":")
+            params = deserialize_kwargs("" if not len(params_or_empty) else params_or_empty[0])
+            if not gname in builtin_groups:
+                print(f"unknown group '{gname}'. try 'asstrace.py -g help'", file=sys.stderr)
+            g = builtin_groups[gname]
+            assert isinstance(g, (Callable, dict[str, Callable]))
+            
+            if isinstance(g, Callable):
+                expected_args = signature_get_arguments(g)
+                if (params_names := list(params.keys())) != expected_args:
+                    raise ValueError(f"Params mismatch for group '{gname}'! Was expecting {expected_args}, got {params_names} instead.")
+                g = g(**params)
+            for syscall, cmd in g.items():
+                assert syscall not in user_hooks
+                user_hooks[syscall] = cmd()
+        pass
+    
+    process = subprocess.Popen(args.argv)
 
     pid = builtins.tracee_pid = process.pid
 
@@ -441,11 +614,11 @@ if __name__ == "__main__":
             
             syscall_name = arch_syscalls.get(syscall_info.nr, "unknown_syscall")
 
-            if (user_hook_name := f"asstrace_{syscall_name}") in user_hook_names:
+            if syscall_name in user_hooks:
 
                 # Actually invoke user hook.
-                print(f"\033[1m{user_hook_name}\033[0m")
-                user_hook_fn = getattr(user_hook_module, user_hook_name)
+                print(f"{Color.bold}{syscall_name}{Color.reset_bold}", file=sys.stderr)
+                user_hook_fn = user_hooks[syscall_name]
                 hook_ret = user_hook_fn(*syscall_params_getter(regs))
 
                 skip_real_syscall \
@@ -465,8 +638,9 @@ if __name__ == "__main__":
                 ptrace_set_regs_arch_agnostic(pid, regs)
             else:
                 # don't intercept a syscall - just log invocation params.
-                print_end = '\n' if syscall_name.startswith("exit") else ''
-                print(f"{syscall_name}({', '.join([hex(x) for x in syscall_info.args])}) = ", end=print_end, file=sys.stderr)
+                if not args.quiet:
+                    print_end = '\n' if syscall_name.startswith("exit") else ''
+                    print(f"{syscall_name}({', '.join([hex(x) for x in syscall_info.args])}) = ", end=print_end, file=sys.stderr)
         
         elif syscall_info.op == PTRACE_SYSCALL_INFO_EXIT:
             if state.cur_syscall_overriden_with_sideffectless:
@@ -475,8 +649,9 @@ if __name__ == "__main__":
                 setattr(regs, system_abi.syscall_ret_val, state.user_ret_val)
             state.cur_syscall_overriden_with_sideffectless = False
             ptrace_set_regs_arch_agnostic(pid, regs)
-            retval = getattr(regs, system_abi.syscall_ret_val)
-            print(f"{hex(retval)}", file=sys.stderr)
+            if not args.quiet:
+                retval = getattr(regs, system_abi.syscall_ret_val)
+                print(f"{hex(retval)}", file=sys.stderr)
 
 
     process.communicate()
