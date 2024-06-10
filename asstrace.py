@@ -384,24 +384,23 @@ class Cmd():
             raise TypeError("Cannot instantiate abstract class.")
     def __call__(self):
         assert getattr(self, "_function", None)
-        keys = self.__dataclass_fields__.keys()
-        return self._function(**dict(((k, getattr(self, k)) for k in keys)))
+        return self._function()
+        # keys = self.__dataclass_fields__.keys()
+        # return self._function(**dict(((k, getattr(self, k)) for k in keys)))
 
 def deserialize_ex(s: str, known_cmds: dict[str, Type[Cmd]]) -> tuple[str, Cmd]:
-    # close:sleep,time=10,x=y,...
-    # unlink:nop
-    # raise ValueError(ExitCmd.__dataclass_fields__.values())
+    # close:sleep[:time=10,x=y,...]
     try:
-        syscall, cmd_and_params = s.split(":")
-        cmd, *params = cmd_and_params.split(",")
-        params = dict([x.split("=") for x in params])
+        syscall, cmd, *maybe_params = s.split(":")
+        params = deserialize_kwargs("" if not len(maybe_params) else maybe_params[0])
+        
         cmd_type : Type = known_cmds[cmd]
 
         for field in cmd_type.__dataclass_fields__.values():
             assert field.type in [str, int]
-            if field.default not in params:
+            if field.name not in params:
                 if isinstance(field.default, _MISSING_TYPE):
-                    raise  ValueError(f"field '{field.name}' missing during '{cmd}' initialization (and doesn't have default value)")
+                    raise ValueError(f"field '{field.name}' missing during '{cmd}' initialization (and doesn't have default value)")
             else:
                 res = params[field.name]
                 if field.type is int:
@@ -484,6 +483,9 @@ known_builtin_expr_grups = {
     "vmlinux": partial(filesubst_factory, old="/sys/kernel/btf/vmlinux"),
 }
 
+def deserialize_kwargs(s: str) -> dict[str, str]:
+    assert isinstance(s, str)
+    return dict() if not s else dict([x.split("=") for x in s.split(",")])
 
 if __name__ == "__main__":
 
@@ -531,14 +533,16 @@ if __name__ == "__main__":
             print(", ".join(known_builtin_expr_grups.keys()))
             exit(0)
         for gname_and_params in groups:
-            # TODO try ./asstrace.py -ex close:sleep,time=1 -- ls
-            gname, params = gname_and_params.split(":") # TODO tu jestem
+            gname, *params_or_empty = gname_and_params.split(":")
+            params = deserialize_kwargs("" if not len(params_or_empty) else params_or_empty[0])
             if not gname in known_builtin_expr_grups:
                 print(f"unknown group '{gname}'. try 'asstrace.py -g help'", file=sys.stderr)
             g = known_builtin_expr_grups[gname]
-            assert isinstance(g, (Callable, dict))
+            assert isinstance(g, (Callable, dict[str, Callable]))
+            # raise ValueError(g.func) g.keywords
+            raise ValueError(dir(g.func))
             if isinstance(g, Callable):
-                g = g(**dict([x.split("=") for x in params.split(",")]))
+                g = g(**params)
             for syscall, cmd in g.items():
                 assert syscall not in user_hooks
                 user_hooks[syscall] = cmd()
