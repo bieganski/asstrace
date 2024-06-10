@@ -14,7 +14,17 @@ from typing import Optional, Any, Callable, Type
 import platform
 from enum import Enum
 from dataclasses import dataclass, _MISSING_TYPE
-from functools import partial
+
+class Color(Enum):
+    bold = "\033[1m"
+    reset_bold = "\033[0m"
+    
+    def __str__(self) -> str:
+        """
+        emulates StrEnum for f-strings (that call __str__ under the hood)
+        """
+        return str(self.value)
+
 
 logging.basicConfig(level=logging.INFO)
 
@@ -457,35 +467,43 @@ class PathSubstCmd(Cmd):
             AT_FDCWD_LOWER_4BYTES = 0xffffff9c
 
             assert not ((dfd & 0xffff_ffff) ^ AT_FDCWD_LOWER_4BYTES)
-            path = API.ptrace_read_null_terminated(filename, 1024).decode("ascii")
-            path = Path(path).absolute()
-            # if path not in subst_map:
-            if path != Path(self.old).absolute():
+            
+            path_extractor = lambda pth: Path(pth).expanduser().absolute()
+
+            tracee_requested_path = API.ptrace_read_null_terminated(filename, 1024).decode("ascii")
+            
+            path, old, new = map(path_extractor, [tracee_requested_path, self.old, self.new])
+            
+            if path != old:
+                # user opens file that is out of scope of our tampering
                 API.invoke_syscall_anyway()
                 return
-            # replacement = subst_map[path]
-            replacement = Path(self.new).absolute()
-            print(f">> just_subst_filepath: {replacement}")
-            if not Path(replacement).exists():
-                raise ValueError(f"{replacement} does not exist! TODO: error might be false, if tracee is in different FS namespace.")
-            API.ptrace_write_mem_null_terminated(filename, bytes(str(replacement), encoding="ascii"))
+            print(f"{Color.bold}{old} -> {new}{Color.reset_bold}")
+            if not new.exists():
+                raise ValueError(f"{new} does not exist! TODO: error might be false, if tracee is in different FS namespace.")
+            API.ptrace_write_mem_null_terminated(filename, bytes(str(new), encoding="ascii"))
             API.invoke_syscall_anyway()
         return just_subst_filepath
 
 filesubst_factory = lambda old, new: {
-    "open":       partial(ExitCmd, msg="'open' was not expected, rather 'openat'"),
-    "openat":     partial(PathSubstCmd, old=old, new=new),
-    "faccessat2": partial(PathSubstCmd, old=old, new=new),
+    "open":       ExitCmd(msg="'open' was not expected, rather 'openat'"),
+    "openat":     PathSubstCmd(old=old, new=new),
+    "faccessat2": PathSubstCmd(old=old, new=new),
 }
 
-known_builtin_expr_grups = {
+builtin_groups = {
     "filesubst": filesubst_factory,
-    "vmlinux": partial(filesubst_factory, old="/sys/kernel/btf/vmlinux"),
+    "vmlinux": lambda new: filesubst_factory(old="/sys/kernel/btf/vmlinux", new=new),
 }
 
 def deserialize_kwargs(s: str) -> dict[str, str]:
     assert isinstance(s, str)
     return dict() if not s else dict([x.split("=") for x in s.split(",")])
+
+def signature_get_arguments(f: Callable) -> list[str]:
+    import inspect
+    signature = inspect.signature(f)
+    return [param.name for param in signature.parameters.values()]
 
 if __name__ == "__main__":
 
@@ -502,6 +520,7 @@ if __name__ == "__main__":
     parser.add_argument("-ex", "--expressions", nargs="+", help="try 'asstrace.py -ex help' to list all available commands")
     parser.add_argument("-x", "--batch", type=Path)
     parser.add_argument("-g", "--groups", nargs="+")
+    parser.add_argument("-q", "--quiet", action="store_true")
     parser.add_argument("argv", nargs="+")
     
     # 'user_hooks' is an union of all user-provided commands, either -x, -ex or -b.
@@ -530,25 +549,25 @@ if __name__ == "__main__":
 
     if groups := args.groups:
         if "help" in groups:
-            print(", ".join(known_builtin_expr_grups.keys()))
+            print(", ".join(builtin_groups.keys()))
             exit(0)
         for gname_and_params in groups:
             gname, *params_or_empty = gname_and_params.split(":")
             params = deserialize_kwargs("" if not len(params_or_empty) else params_or_empty[0])
-            if not gname in known_builtin_expr_grups:
+            if not gname in builtin_groups:
                 print(f"unknown group '{gname}'. try 'asstrace.py -g help'", file=sys.stderr)
-            g = known_builtin_expr_grups[gname]
+            g = builtin_groups[gname]
             assert isinstance(g, (Callable, dict[str, Callable]))
-            # raise ValueError(g.func) g.keywords
-            raise ValueError(dir(g.func))
+            
             if isinstance(g, Callable):
+                expected_args = signature_get_arguments(g)
+                if (params_names := list(params.keys())) != expected_args:
+                    raise ValueError(f"Params mismatch for group '{gname}'! Was expecting {expected_args}, got {params_names} instead.")
                 g = g(**params)
             for syscall, cmd in g.items():
                 assert syscall not in user_hooks
                 user_hooks[syscall] = cmd()
         pass
-    # raise ValueError(user_hooks)
-
     
     process = subprocess.Popen(args.argv)
 
@@ -598,7 +617,7 @@ if __name__ == "__main__":
             if syscall_name in user_hooks:
 
                 # Actually invoke user hook.
-                print(f"\033[1m{syscall_name}\033[0m", file=sys.stderr)
+                print(f"{Color.bold}{syscall_name}{Color.reset_bold}", file=sys.stderr)
                 user_hook_fn = user_hooks[syscall_name]
                 hook_ret = user_hook_fn(*syscall_params_getter(regs))
 
@@ -619,8 +638,9 @@ if __name__ == "__main__":
                 ptrace_set_regs_arch_agnostic(pid, regs)
             else:
                 # don't intercept a syscall - just log invocation params.
-                print_end = '\n' if syscall_name.startswith("exit") else ''
-                print(f"{syscall_name}({', '.join([hex(x) for x in syscall_info.args])}) = ", end=print_end, file=sys.stderr)
+                if not args.quiet:
+                    print_end = '\n' if syscall_name.startswith("exit") else ''
+                    print(f"{syscall_name}({', '.join([hex(x) for x in syscall_info.args])}) = ", end=print_end, file=sys.stderr)
         
         elif syscall_info.op == PTRACE_SYSCALL_INFO_EXIT:
             if state.cur_syscall_overriden_with_sideffectless:
@@ -629,8 +649,9 @@ if __name__ == "__main__":
                 setattr(regs, system_abi.syscall_ret_val, state.user_ret_val)
             state.cur_syscall_overriden_with_sideffectless = False
             ptrace_set_regs_arch_agnostic(pid, regs)
-            retval = getattr(regs, system_abi.syscall_ret_val)
-            print(f"{hex(retval)}", file=sys.stderr)
+            if not args.quiet:
+                retval = getattr(regs, system_abi.syscall_ret_val)
+                print(f"{hex(retval)}", file=sys.stderr)
 
 
     process.communicate()
