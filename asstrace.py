@@ -535,26 +535,26 @@ try 'asstrace.py -ex help' to list all available commands.
 
 if __name__ == "__main__":
 
-    try:
-        _, user_hooks_py_path, *args = sys.argv
-    except ValueError:
-        print(f"usage: {Path(__file__).name} <syscalls_to_be_intercepted.py> <command> [<arguments>]")
-        exit(1)
-
-    arch_syscalls : dict[int, str] = load_syscalls()
-
     from argparse import ArgumentParser, RawTextHelpFormatter
     parser = ArgumentParser(formatter_class=RawTextHelpFormatter)
     parser.add_argument("-ex", "--expressions", help=expr_help)
     parser.add_argument("-x", "--batch", type=Path)
     parser.add_argument("-g", "--groups", nargs="+")
     parser.add_argument("-q", "--quiet", action="store_true")
-    parser.add_argument("argv", nargs="+")
+    parser.add_argument("-p", "--pid", type=int)
+    parser.add_argument("argv", nargs="*")
     
     # 'user_hooks' is an union of all user-provided commands, either -x, -ex or -b.
     user_hooks: dict[str, Callable] = dict()
 
     args = parser.parse_args()
+
+    if args.pid:
+        if args.argv:
+            raise RuntimeError("--pid and <argv> are mututally exclusive! (either spawn a process or connect to existing one)")
+    else:
+        if not args.argv:
+            raise RuntimeError("either --pid or <argv> list are required! (attach to running process or spawn new bash command)")
 
     if args.batch:
         user_hook_abs = args.batch.absolute()
@@ -611,18 +611,18 @@ if __name__ == "__main__":
                 assert syscall not in user_hooks
                 user_hooks[syscall] = cmd()
         pass
-    
-    process = subprocess.Popen(args.argv)
 
-    pid = builtins.tracee_pid = process.pid
+    no_fork_but_seize_running_process = (args.pid is not None)
+
+    if not no_fork_but_seize_running_process:
+        process = subprocess.Popen(args.argv)
+        pid = builtins.tracee_pid = process.pid
+    else:
+        pid = args.pid
 
     res = ptrace(PTRACE_ATTACH, pid, None, None)
 
     check_child_alive_or_exit(pid)
-
-    # TODO - implement SEIZE mode, not only spawning new process.
-    # currently only supported in asstrace.cc
-    no_fork_but_seize_running_process = False
 
     prepare_tracee(pid=pid, no_fork_but_seize_running_process=no_fork_but_seize_running_process)
 
@@ -631,6 +631,7 @@ if __name__ == "__main__":
         user_ret_val: int = 0
     
     state = loop_state()
+    arch_syscalls : dict[int, str] = load_syscalls()
     sideeffectfree_syscall: int = get_sideeffectfree_syscall_number(arch_syscalls=arch_syscalls)
 
     while True:
