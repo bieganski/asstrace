@@ -219,7 +219,11 @@ def ptrace_set_regs_arch_agnostic(pid: int, user_regs: user_regs_struct):
 import builtins
 if __name__ == "__main__":
     builtins.user_hook_requested_syscall_invocation = False
+    builtins.user_requested_debugger_detach = False
     builtins.tracee_pid = -1
+
+def _user_api_detach_debugger():
+    builtins.user_requested_debugger_detach = True
 
 def _user_api_invoke_syscall_anyway():
     builtins.user_hook_requested_syscall_invocation = True
@@ -323,6 +327,7 @@ class API:
     ptrace_read_null_terminated = _user_api_read_tracee_mem_null_terminated
     tracee_resolve_fd = _user_api_tracee_resolve_fd
     patch_tracee_syscall_params = patch_tracee_syscall_params
+    detach = _user_api_detach_debugger
 
 
 
@@ -468,6 +473,14 @@ class ExitCmd(Cmd):
         return aux
 
 @dataclass
+class DetachCmd(Cmd):
+    help = "detaches debugger from process"
+    def _function(self):
+        def aux(*syscall_invocation_params):
+            _user_api_detach_debugger()
+            _user_api_invoke_syscall_anyway()
+        return aux
+@dataclass
 class PathSubstCmd(Cmd):
     old: str
     new: str
@@ -506,6 +519,7 @@ known_expressions = {
     "exit": ExitCmd,
     "delay": DelayCmd,
     "pathsubst": PathSubstCmd,
+    "detach": DetachCmd,
 }
 
 filesubst_factory = lambda old, new: {
@@ -693,6 +707,11 @@ if __name__ == "__main__":
                     print(f"{syscall_name}({', '.join([hex(x) for x in syscall_info.args])}) = ", end=print_end, file=sys.stderr)
         
         elif syscall_info.op == PTRACE_SYSCALL_INFO_EXIT:
+            if builtins.user_requested_debugger_detach:
+                print(f"{Color.bold}asstrace: detaching from {pid} on user request{Color.reset_bold}", flush=True)
+                res = ptrace(PTRACE_DETACH, pid, None, None)
+                assert res == 0
+                exit(0)
             if state.cur_syscall_overriden_with_sideffectless:
                 if not isinstance(state.user_ret_val, int):
                     raise ValueError("User hook is obliged to return integer value, if real syscall is not executed")
