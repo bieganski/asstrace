@@ -467,17 +467,11 @@ class ExitCmd(Cmd):
             exit(self.ret)
         return aux
 
-known_expressions = {
-    "sleep": SleepCmd,
-    "nop": NopCmd,
-    "exit": ExitCmd,
-    "delay": DelayCmd,
-}
-
 @dataclass
 class PathSubstCmd(Cmd):
     old: str
     new: str
+    help = "invokes syscall but with modified file path (assumes second syscall argument to be a fs path string, suitable for openat,fstatat etc.)"
     
     def _function(self):
         def just_subst_filepath(dfd, filename, mode, *_):
@@ -498,16 +492,27 @@ class PathSubstCmd(Cmd):
                 API.invoke_syscall_anyway()
                 return
             print(f"{Color.bold}{old} -> {new}{Color.reset_bold}")
+            if len(new.name) > len(old.name):
+                raise ValueError(f"{Color.bold}memory corruption attempted (as we don't implement memory allocation yet), killing.{Color.reset_bold}")
             if not new.exists():
                 raise ValueError(f"{new} does not exist! TODO: error might be false, if tracee is in different FS namespace.")
             API.ptrace_write_mem_null_terminated(filename, bytes(str(new), encoding="ascii"))
             API.invoke_syscall_anyway()
         return just_subst_filepath
 
+known_expressions = {
+    "sleep": SleepCmd,
+    "nop": NopCmd,
+    "exit": ExitCmd,
+    "delay": DelayCmd,
+    "pathsubst": PathSubstCmd,
+}
+
 filesubst_factory = lambda old, new: {
     "open":       ExitCmd(msg="'open' was not expected, rather 'openat'"),
     "openat":     PathSubstCmd(old=old, new=new),
     "faccessat2": PathSubstCmd(old=old, new=new),
+    "statx": PathSubstCmd(old=old, new=new),
 }
 
 builtin_groups = {
@@ -549,6 +554,20 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    if args.expressions and "help" in args.expressions.split():
+        for name, type in known_expressions.items():
+            print(name, end=":")
+            for i, field in enumerate(type.__dataclass_fields__.values()):
+                if i:
+                    print(",", end="")
+                print(f"{field.name}:{field.type.__name__}", end="")
+                if not isinstance(field.default, _MISSING_TYPE):
+                    print(f"(='{field.default}')", end="")
+            if hasattr(type, "help"):
+                print(f"\t\t{type.help}", end="")
+            print("")
+        exit(0)
+
     if args.pid:
         if args.argv:
             raise RuntimeError("--pid and <argv> are mututally exclusive! (either spawn a process or connect to existing one)")
@@ -571,19 +590,6 @@ if __name__ == "__main__":
     
     if exs := args.expressions:
         exs = exs.split()
-        if "help" in exs:
-            for name, type in known_expressions.items():
-                print(name, end=":")
-                for i, field in enumerate(type.__dataclass_fields__.values()):
-                    if i:
-                        print(",", end="")
-                    print(f"{field.name}:{field.type.__name__}", end="")
-                    if not isinstance(field.default, _MISSING_TYPE):
-                        print(f"(='{field.default}')", end="")
-                if getattr(type, "help"):
-                    print(f"\t\t{type.help}", end="")
-                print("")
-            exit(0)
         for e in exs:
             syscalls, cmd = deserialize_ex(e, known_cmds=known_expressions)
             for x in syscalls:
