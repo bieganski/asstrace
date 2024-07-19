@@ -548,6 +548,7 @@ some examples:
     -ex 'open,openat:delay:time=0.5' - invoke each 'open' and 'openat' syscall as usual, but sleep for 0.5s before each invocation
     -ex 'unlinkat:nop' - 'unlinkat' syscall will not have any effect. value '0' will be returned to userspace.
     -ex 'mmap:nop:ret=-1' - 'mmap' syscall will not have any effect. value '-1' will be returned to userspace, meaning that mmap failed (see 'man mmap').
+    -ex 'open:nop:ret=-1 read:detach' - fail each open, detach on first read
 
 try 'asstrace.py -ex help' to list all available commands.
 """
@@ -570,16 +571,16 @@ if __name__ == "__main__":
 
     if args.expressions and "help" in args.expressions.split():
         for name, type in known_expressions.items():
-            print(name, end=":")
+            tokens = []
+            tokens.append(f"{name}:")
             for i, field in enumerate(type.__dataclass_fields__.values()):
                 if i:
-                    print(",", end="")
-                print(f"{field.name}:{field.type.__name__}", end="")
+                    tokens.append(",")
+                tokens.append(f"{field.name}:{field.type.__name__}")
                 if not isinstance(field.default, _MISSING_TYPE):
-                    print(f"(='{field.default}')", end="")
-            if hasattr(type, "help"):
-                print(f"\t\t{type.help}", end="")
-            print("")
+                    tokens.append(f"(='{field.default}')")
+            print(f"{''.join(tokens):<40}", end="")
+            print(type.help if hasattr(type, "help") else "")
         exit(0)
 
     if args.pid:
