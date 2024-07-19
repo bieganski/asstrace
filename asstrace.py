@@ -14,6 +14,7 @@ from typing import Optional, Any, Callable, Type
 import platform
 from enum import Enum
 from dataclasses import dataclass, _MISSING_TYPE
+import time
 
 class Color(Enum):
     bold = "\033[1m"
@@ -398,61 +399,79 @@ class Cmd():
         # keys = self.__dataclass_fields__.keys()
         # return self._function(**dict(((k, getattr(self, k)) for k in keys)))
 
-def deserialize_ex(s: str, known_cmds: dict[str, Type[Cmd]]) -> tuple[str, Cmd]:
-    # close:sleep[:time=10,x=y,...]
+def deserialize_ex(s: str, known_cmds: dict[str, Type[Cmd]]) -> tuple[list[str], Cmd]:
+    # close[,open,openat]:sleep[:time=10,x=y,...]
     try:
-        syscall, cmd, *maybe_params = s.split(":")
+        _syscalls, cmd, *maybe_params = s.split(":")
+        syscalls = _syscalls.split(",")
         params = deserialize_kwargs("" if not len(maybe_params) else maybe_params[0])
         
         cmd_type : Type = known_cmds[cmd]
 
         for field in cmd_type.__dataclass_fields__.values():
-            assert field.type in [str, int]
+            assert field.type in [str, int, float]
             if field.name not in params:
                 if isinstance(field.default, _MISSING_TYPE):
                     raise ValueError(f"field '{field.name}' missing during '{cmd}' initialization (and doesn't have default value)")
             else:
                 res = params[field.name]
-                if field.type is int:
-                    res = int(res)
+                if field.type in [int, float]:
+                    res = field.type(res)
                 params[field.name] = res
-        return syscall, known_cmds[cmd](**params)
+        return syscalls, known_cmds[cmd](**params)
     except Exception as e:
         print(f"deserialization of string '{s}' failed: {e}", file=sys.stderr)
         exit(1)
 
 @dataclass
-class SleepCmd(Cmd):
-    time: int
+class DelayCmd(Cmd):
+    time: float
+    help = "invoke original syscall, but delayed"
     def _function(self):
-        def aux(*_):
-            import time as time_module
-            time_module.sleep(self.time)
-            return 0
+        def aux(*syscall_invocation_params):
+            time.sleep(self.time)
+            _user_api_invoke_syscall_anyway()
+        return aux
+
+@dataclass
+class SleepCmd(Cmd):
+    time: float
+    help = "replace syscall with sleep"
+    ret: int = 0
+    def _function(self):
+        def aux(*syscall_invocation_params):
+            time.sleep(self.time)
+            return self.ret
         return aux
 
 @dataclass
 class NopCmd(Cmd):
+    help = "replace syscall with no-op syscall (getpid)"
+    ret: int = 0
+    msg: str = "nop"
     def _function(self):
-        def aux(*_):
-            print(f"nop")
-            return 0
+        def aux(*syscall_invocation_params):
+            print(self.msg)
+            return self.ret
         return aux
 
 @dataclass
 class ExitCmd(Cmd):
     msg : str = ""
+    help = "exit program at first syscall invocation"
+    ret: int = 0
     def _function(self):
-        def aux(*_):
+        def aux(*syscall_invocation_params):
             if self.msg:
                 print(self.msg)
-            exit(0)
+            exit(self.ret)
         return aux
 
 known_expressions = {
     "sleep": SleepCmd,
     "nop": NopCmd,
     "exit": ExitCmd,
+    "delay": DelayCmd,
 }
 
 @dataclass
@@ -505,6 +524,15 @@ def signature_get_arguments(f: Callable) -> list[str]:
     signature = inspect.signature(f)
     return [param.name for param in signature.parameters.values()]
 
+expr_help = """
+some examples:
+    -ex 'open,openat:delay:time=0.5' - invoke each 'open' and 'openat' syscall as usual, but sleep for 0.5s before each invocation
+    -ex 'unlinkat:nop' - 'unlinkat' syscall will not have any effect. value '0' will be returned to userspace.
+    -ex 'mmap:nop:ret=-1' - 'mmap' syscall will not have any effect. value '-1' will be returned to userspace, meaning that mmap failed (see 'man mmap').
+
+try 'asstrace.py -ex help' to list all available commands.
+"""
+
 if __name__ == "__main__":
 
     try:
@@ -515,9 +543,9 @@ if __name__ == "__main__":
 
     arch_syscalls : dict[int, str] = load_syscalls()
 
-    from argparse import ArgumentParser
-    parser = ArgumentParser()
-    parser.add_argument("-ex", "--expressions", nargs="+", help="try 'asstrace.py -ex help' to list all available commands")
+    from argparse import ArgumentParser, RawTextHelpFormatter
+    parser = ArgumentParser(formatter_class=RawTextHelpFormatter)
+    parser.add_argument("-ex", "--expressions", help=expr_help)
     parser.add_argument("-x", "--batch", type=Path)
     parser.add_argument("-g", "--groups", nargs="+")
     parser.add_argument("-q", "--quiet", action="store_true")
@@ -542,10 +570,25 @@ if __name__ == "__main__":
         del user_hook_abs, import_module_str, user_hook_module, user_hook_names
     
     if exs := args.expressions:
+        exs = exs.split()
+        if "help" in exs:
+            for name, type in known_expressions.items():
+                print(name, end=":")
+                for i, field in enumerate(type.__dataclass_fields__.values()):
+                    if i:
+                        print(",", end="")
+                    print(f"{field.name}:{field.type.__name__}", end="")
+                    if not isinstance(field.default, _MISSING_TYPE):
+                        print(f"(='{field.default}')", end="")
+                if getattr(type, "help"):
+                    print(f"\t\t{type.help}", end="")
+                print("")
+            exit(0)
         for e in exs:
-            syscall, cmd = deserialize_ex(e, known_cmds=known_expressions)
-            assert syscall not in user_hooks
-            user_hooks[syscall] = cmd()
+            syscalls, cmd = deserialize_ex(e, known_cmds=known_expressions)
+            for x in syscalls:
+                assert x not in user_hooks
+                user_hooks[x] = cmd()
 
     if groups := args.groups:
         if "help" in groups:
