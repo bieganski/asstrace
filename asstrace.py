@@ -214,6 +214,14 @@ def ptrace_get_regs_arch_agnostic(pid: int, user_regs: user_regs_struct):
 def ptrace_set_regs_arch_agnostic(pid: int, user_regs: user_regs_struct):
     return _ptrace_get_or_set_regs_arch_agnostic(pid=pid, ref=user_regs, do_set=True)
 
+@dataclass
+class SyscallDetailedContext:
+    """
+    Basic context is (up to) 6 syscall arguments (available through hook signature, e.g 'def write(fd, buf, num, *_)').
+    Detailed context is available on api request.
+    """
+    syscall_name : str
+
 # https://stackoverflow.com/a/142566
 # the problem: allow importee to change importer's global variable.
 import builtins
@@ -222,6 +230,12 @@ if __name__ == "__main__":
     builtins.user_requested_debugger_detach = False
     builtins.tracee_pid = -1
     builtins.user_hooks = dict()
+    builtins.cur_syscall_context = None
+
+def _user_api_get_detailed_context():
+    res = builtins.cur_syscall_context
+    assert res is not None
+    return res
 
 def _user_api_register_hook(syscall: str, hook: "Cmd"):
     hooks = builtins.user_hooks
@@ -323,7 +337,6 @@ def patch_tracee_syscall_params(*args, **kwargs):
     update_user_regs_inplace(abi=system_abi, patch=final, user_regs=builtins.tracee_regs)
 
 
-
 class API:
     ptrace_set_regs_arch_agnostic = ptrace_set_regs_arch_agnostic
     ptrace_get_regs_arch_agnostic = ptrace_get_regs_arch_agnostic
@@ -337,6 +350,7 @@ class API:
     patch_tracee_syscall_params = patch_tracee_syscall_params
     detach = _user_api_detach_debugger
     register_hook = _user_api_register_hook
+    get_detailed_context = _user_api_get_detailed_context
 
 
 def check_child_alive_or_exit(pid: int):
@@ -457,6 +471,76 @@ class SleepCmd(Cmd):
             return self.ret
         return aux
 
+
+@dataclass
+class Signature:
+    _orig: str
+
+    @staticmethod
+    def from_line(line: str):
+        assert len(line.splitlines()) == 1
+        return Signature(_orig=line)
+
+    def fmt(self) -> str:
+        words = self._orig.split()
+
+        assert words[0] == "asmlinkage"
+        assert words[2].startswith(("sys_", "compat_"))
+
+        # Apply transformations.
+        words[2] = words[2][4:]
+        words = words[1:]
+        words = [x for x in words if x != "__user"]
+        return " ".join(words)
+
+    def basename(self, with_sys_prefix=False) -> str:
+        res = self._orig.split("(")[0].split()[-1]
+        return res if with_sys_prefix else res.removeprefix("compat_").removeprefix("sys_")
+
+    @property
+    def num_params(self) -> int:
+        return self._orig.count(",") + 1
+
+    @property
+    def param_types_and_varnames(self) -> list[str]:
+        start, end = self._orig.index("("), self._orig.index(")")
+        params_str = self._orig[start:(end+1)]
+        params_lst = params_str.split(",")
+        assert len(params_lst) == self.num_params
+        return params_lst
+
+def get_signature(syscall_name: str) -> Signature:
+    all_signatures = [Signature.from_line(x) for x in Path("signatures.txt").read_text().splitlines()]
+    matches = [x for x in all_signatures if x.basename() == syscall_name]
+    if len(matches) != 1:
+        raise ValueError(f"Was expecting to find exactly one matching signature, got {len(matches)} instead: {matches}")
+    return matches[0]
+
+def guess_const_char_ptr_param(context: SyscallDetailedContext) -> Optional[int]:
+    """
+    consider 'open(path, flags)' and openat(dirfd, path, flags).
+    that function tries to determine which param stands for path. e.g. it will return 0 for open, 1 for openat.
+    returns None if could not guess.
+    """
+    signature = get_signature(syscall_name=context.syscall_name)
+    vars = signature.param_types_and_varnames
+    matches = [i for i, x in enumerate(vars) if "const char __user *" in x]
+    if len(matches) != 1:
+        raise ValueError(f"Could not auto-determine the param of type 'const char*' for syscall {context.syscall_name}! Was expecting exactly one match, got {len(matches)} instead!")
+    return matches[0]
+
+def fmt_msg(msg: str, syscall_args: list[int]) -> str:
+    if "{path}" in msg:
+        context = API.get_detailed_context()
+        path_syscall_param_idx = guess_const_char_ptr_param(context=context)
+        if path_syscall_param_idx is None:
+            raise RuntimeError(f"Could not auto-guess path idx for syscall {context.syscall_name}")
+        if len(syscall_args) <= path_syscall_param_idx:
+            raise RuntimeError(f"Auto-guessed file path at index {path_syscall_param_idx} for syscall {context.syscall_name}, but argument list provided is of length {len(syscall_args)}")
+        addr = syscall_args[path_syscall_param_idx]
+        path = API.ptrace_read_null_terminated(addr, 1000).decode("ascii")
+    return msg.replace("{path}", path)
+
 @dataclass
 class NopCmd(Cmd):
     help = "replace syscall with no-op syscall (getpid)"
@@ -464,7 +548,8 @@ class NopCmd(Cmd):
     msg: str = "nop"
     def _function(self):
         def aux(*syscall_invocation_params):
-            print(self.msg)
+            if self.msg:
+                print(fmt_msg(self.msg, syscall_invocation_params))
             return self.ret
         return aux
 
@@ -476,7 +561,7 @@ class ExitCmd(Cmd):
     def _function(self):
         def aux(*syscall_invocation_params):
             if self.msg:
-                print(self.msg)
+                print(fmt_msg(self.msg, syscall_invocation_params))
             exit(self.ret)
         return aux
 
@@ -554,9 +639,9 @@ def signature_get_arguments(f: Callable) -> list[str]:
 expr_help = """
 some examples:
     -ex 'open,openat:delay:time=0.5' - invoke each 'open' and 'openat' syscall as usual, but sleep for 0.5s before each invocation
-    -ex 'unlinkat:nop' - 'unlinkat' syscall will not have any effect. value '0' will be returned to userspace.
+    -ex 'unlink:nop' - 'unlink' syscall will not have any effect. value '0' will be returned to userspace.
     -ex 'mmap:nop:ret=-1' - 'mmap' syscall will not have any effect. value '-1' will be returned to userspace, meaning that mmap failed (see 'man mmap').
-    -ex 'open:nop:ret=-1 read:detach' - fail each open, detach on first read
+    -ex 'open:nop:ret=-1' -ex read:detach - fail each open, detach on first read
 
 try 'asstrace.py -ex help' to list all available commands.
 """
@@ -565,7 +650,7 @@ if __name__ == "__main__":
 
     from argparse import ArgumentParser, RawTextHelpFormatter
     parser = ArgumentParser(formatter_class=RawTextHelpFormatter)
-    parser.add_argument("-ex", "--expressions", help=expr_help)
+    parser.add_argument("-ex", "--expressions", nargs="+", help=expr_help)
     parser.add_argument("-x", "--batch", type=Path)
     parser.add_argument("-g", "--groups", nargs="+")
     parser.add_argument("-q", "--quiet", action="store_true")
@@ -581,7 +666,7 @@ if __name__ == "__main__":
     if args.quietquiet:
         args.quiet = True
 
-    if args.expressions and "help" in args.expressions.split():
+    if args.expressions and "help" in args.expressions:
         for name, type in known_expressions.items():
             tokens = []
             tokens.append(f"{name}:")
@@ -617,7 +702,6 @@ if __name__ == "__main__":
         del user_hook_abs, import_module_str, user_hook_module, user_hook_names
     
     if exs := args.expressions:
-        exs = exs.split()
         for e in exs:
             syscalls, cmd = deserialize_ex(e, known_cmds=known_expressions)
             for x in syscalls:
@@ -668,6 +752,11 @@ if __name__ == "__main__":
     arch_syscalls : dict[int, str] = load_syscalls()
     sideeffectfree_syscall: int = get_sideeffectfree_syscall_number(arch_syscalls=arch_syscalls)
 
+    # validate user_hooks.
+    for x in user_hooks:
+        if x not in arch_syscalls.values():
+            raise RuntimeError(f"Defined user-hook for '{x}', but such syscall seemingly doesn't exist!")
+
     while True:
         
         ptrace(PTRACE_SYSCALL, pid, None, None)
@@ -680,7 +769,7 @@ if __name__ == "__main__":
         syscall_info = ptrace_syscall_info()
         ptrace(PTRACE_GET_SYSCALL_INFO, pid, ctypes.sizeof(ptrace_syscall_info), ctypes.byref(syscall_info))
         
-        if syscall_info.op not in [PTRACE_SYSCALL_INFO_EXIT, PTRACE_SYSCALL_INFO_ENTRY]:
+        if syscall_info.op not in [PTRACE_SYSCALL_INFO_EXIT, PTRACE_SYSCALL_INFO_ENTRY, PTRACE_SYSCALL_INFO_NONE]:
             print(f"PTRACE_GET_SYSCALL_INFO: unknown/unexpected op: {syscall_info.op}")
             continue
 
@@ -694,10 +783,11 @@ if __name__ == "__main__":
 
             if syscall_name in user_hooks:
 
-                # Actually invoke user hook.
+                # Transfer control to user hook.
                 if not args.quietquiet:
                     print(f"{Color.bold}{syscall_name}{Color.reset_bold}", file=sys.stderr)
                 user_hook_fn = user_hooks[syscall_name]
+                builtins.cur_syscall_context = SyscallDetailedContext(syscall_name=syscall_name)
                 hook_ret = user_hook_fn(*syscall_params_getter(regs))
 
                 skip_real_syscall \

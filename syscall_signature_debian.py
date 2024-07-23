@@ -9,6 +9,8 @@ from dataclasses import dataclass
 
 logging.basicConfig(level=logging.INFO)
 
+from asstrace import Signature
+
 @dataclass
 class SyscallTblRecord:
     num: int
@@ -44,35 +46,7 @@ class SyscallCsvField(Enum):
     NAME = "name" # e.g mmap
     NUM_PARAMS = "num_params"  # e.g. 2 for syscall(a, b, c)
     NUMBER = "number"  # value of 'a' for syscall(a, ...)
-
-@dataclass
-class Signature:
-    _orig: str
-
-    @staticmethod
-    def from_line(line: str):
-        assert len(line.splitlines()) == 1
-        return Signature(_orig=line)
-
-    def fmt(self) -> str:
-        words = self._orig.split()
-        
-        assert words[0] == "asmlinkage"
-        assert words[2].startswith(("sys_", "compat_"))
-
-        # Apply transformations.
-        words[2] = words[2][4:]
-        words = words[1:]
-        words = [x for x in words if x != "__user"]
-        return " ".join(words)
-    
-    def basename(self, with_sys_prefix=False) -> str:
-        res = self._orig.split("(")[0].split()[-1]
-        return res if with_sys_prefix else res.removeprefix("compat_").removeprefix("sys_")
-    
-    @property
-    def num_params(self) -> int:
-        return self._orig.count(",") + 1
+    FULL = "full"  # full sginature string
 
 
 def run_shell(cmd: str) -> tuple[str, str]:
@@ -181,6 +155,8 @@ def list_syscalls(tbl: list[SyscallTblRecord], fmt: list[SyscallCsvField]):
                     addend = f"{sig.num_params}"
                 case SyscallCsvField.NUMBER:
                     addend = rec.num
+                case SyscallCsvField.FULL:
+                    addend = " ".join(sig._orig.split()).replace("asmlinkage ", "").replace("sys_io_", "").replace("sys_", "")
                 
             lst.append(addend)
 
