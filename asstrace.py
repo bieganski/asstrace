@@ -221,6 +221,14 @@ if __name__ == "__main__":
     builtins.user_hook_requested_syscall_invocation = False
     builtins.user_requested_debugger_detach = False
     builtins.tracee_pid = -1
+    builtins.user_hooks = dict()
+
+def _user_api_register_hook(syscall: str, hook: "Cmd"):
+    hooks = builtins.user_hooks
+    assert isinstance(hook, Callable)
+    if syscall in hooks:
+        logging.warning(f"Overwriting previously defined hook for syscall {syscall}")
+    hooks[syscall] = hook
 
 def _user_api_detach_debugger():
     builtins.user_requested_debugger_detach = True
@@ -328,7 +336,7 @@ class API:
     tracee_resolve_fd = _user_api_tracee_resolve_fd
     patch_tracee_syscall_params = patch_tracee_syscall_params
     detach = _user_api_detach_debugger
-
+    register_hook = _user_api_register_hook
 
 
 def check_child_alive_or_exit(pid: int):
@@ -561,13 +569,17 @@ if __name__ == "__main__":
     parser.add_argument("-x", "--batch", type=Path)
     parser.add_argument("-g", "--groups", nargs="+")
     parser.add_argument("-q", "--quiet", action="store_true")
+    parser.add_argument("-qq", "--quietquiet", action="store_true")
     parser.add_argument("-p", "--pid", type=int)
     parser.add_argument("argv", nargs="*")
     
     # 'user_hooks' is an union of all user-provided commands, either -x, -ex or -b.
-    user_hooks: dict[str, Callable] = dict()
+    user_hooks: dict[str, Callable] = builtins.user_hooks
 
     args = parser.parse_args()
+
+    if args.quietquiet:
+        args.quiet = True
 
     if args.expressions and "help" in args.expressions.split():
         for name, type in known_expressions.items():
@@ -597,7 +609,8 @@ if __name__ == "__main__":
         exec(f"import {import_module_str} as __user_hook")
         user_hook_module : ModuleType = globals()["__user_hook"] # make IDE happy.
         user_hook_names : list[str] = [x.replace("asstrace_", "") for x in dir(user_hook_module) if x.startswith("asstrace_")]
-        logging.info(f"User-provided hooks: {user_hook_names}")
+        if not args.quietquiet:
+            logging.info(f"User-provided hooks: {user_hook_names}")
         for name in user_hook_names:
             assert name not in user_hooks
             user_hooks[name] = getattr(user_hook_module, f"asstrace_{name}")
@@ -682,7 +695,8 @@ if __name__ == "__main__":
             if syscall_name in user_hooks:
 
                 # Actually invoke user hook.
-                print(f"{Color.bold}{syscall_name}{Color.reset_bold}", file=sys.stderr)
+                if not args.quietquiet:
+                    print(f"{Color.bold}{syscall_name}{Color.reset_bold}", file=sys.stderr)
                 user_hook_fn = user_hooks[syscall_name]
                 hook_ret = user_hook_fn(*syscall_params_getter(regs))
 
