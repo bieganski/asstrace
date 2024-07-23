@@ -597,7 +597,8 @@ class PathSubstCmd(Cmd):
                 # user opens file that is out of scope of our tampering
                 API.invoke_syscall_anyway()
                 return
-            print(f"{Color.bold}{old} -> {new}{Color.reset_bold}")
+            if not args.quietquiet:
+                print(f"{Color.bold}{old} -> {new}{Color.reset_bold}")
             if len(new.name) > len(old.name):
                 raise ValueError(f"{Color.bold}memory corruption attempted (as we don't implement memory allocation yet), killing.{Color.reset_bold}")
             if not new.exists():
@@ -615,7 +616,7 @@ known_expressions = {
     "detach": DetachCmd,
 }
 
-filesubst_factory = lambda old, new: {
+pathsubst_factory = lambda old, new: {
     "open":       ExitCmd(msg="'open' was not expected, rather 'openat'"),
     "openat":     PathSubstCmd(old=old, new=new),
     "faccessat2": PathSubstCmd(old=old, new=new),
@@ -623,8 +624,8 @@ filesubst_factory = lambda old, new: {
 }
 
 builtin_groups = {
-    "filesubst": filesubst_factory,
-    "vmlinux": lambda new: filesubst_factory(old="/sys/kernel/btf/vmlinux", new=new),
+    "pathsubst": pathsubst_factory,
+    "vmlinux": lambda new: pathsubst_factory(old="/sys/kernel/btf/vmlinux", new=new),
 }
 
 def deserialize_kwargs(s: str) -> dict[str, str]:
@@ -640,7 +641,7 @@ expr_help = """
 some examples:
     -ex 'open,openat:delay:time=0.5' - invoke each 'open' and 'openat' syscall as usual, but sleep for 0.5s before each invocation
     -ex 'unlink:nop' - 'unlink' syscall will not have any effect. value '0' will be returned to userspace.
-    -ex 'mmap:nop:ret=-1' - 'mmap' syscall will not have any effect. value '-1' will be returned to userspace, meaning that mmap failed (see 'man mmap').
+    -ex 'mmap:nop:ret=-1' - 'mmap' syscall will not have any effect. value '-1' will be returned to userspace (fault injection; see 'man mmap').
     -ex 'open:nop:ret=-1' -ex read:detach - fail each open, detach on first read
 
 try 'asstrace.py -ex help' to list all available commands.
