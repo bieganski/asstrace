@@ -640,7 +640,7 @@ expr_help = """
 some examples:
     -ex 'open,openat:delay:time=0.5' - invoke each 'open' and 'openat' syscall as usual, but sleep for 0.5s before each invocation
     -ex 'unlink:nop' - 'unlink' syscall will not have any effect. value '0' will be returned to userspace.
-    -ex 'mmap:nop:ret=-1' - 'mmap' syscall will not have any effect. value '-1' will be returned to userspace, meaning that mmap failed (see 'man mmap').
+    -ex 'mmap:nop:ret=-1' - 'mmap' syscall will not have any effect. value '-1' will be returned to userspace (fault injection; see 'man mmap').
     -ex 'open:nop:ret=-1' -ex read:detach - fail each open, detach on first read
 
 try 'asstrace.py -ex help' to list all available commands.
