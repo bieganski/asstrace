@@ -25,6 +25,16 @@ The command used: `echo "int main();" | ./asstrace.py -q  -ex 'unlink:nop:msg=pr
 ![unlink example](jpg/unlink.png)
 
 
+# `pathsubst` example
+
+Often in order to get some functionality, we need to hook more than a single syscall. For such purpose `asstrace` defines concept of groups, available by `-g` CLI param.
+Here we use `pathsubst`, that hooks `open`, `openat`, `faccessat2` and `statx`.
+
+The command used is `./asstrace.py -qq  -g 'pathsubst:old=zeros,new=abc' -- cat zeros`
+
+![pathsubst example](jpg/pathsubst.png)
+
+
 # `count_lines` example
 
 In this example we manipulate `ls -1` command, so that for each regular file that it prints it will include metadata: number of lines.
@@ -36,6 +46,8 @@ The command used: `./asstrace.py -qq -x examples/count_lines.py ls -1`
 The code of `write` syscall in `count_lines` example is slightly more complicated, thus not suitable for `--ex` as previously. Instead we have a Python file that can use `API` functionality:
 
 ```py
+# examples/count_lines.py
+
 from pathlib import Path
 from asstrace import API
 
@@ -58,7 +70,7 @@ def asstrace_write(fd, buf, num, *_):
         return len(res_str) # 'ls -1' program will think that it has written that many characters. 
 ```
 
-# Few small examples
+# Few more examples
 
 ```
 -ex 'open,openat:delay:time=0.5'        - invoke each 'open' and 'openat' syscall as usual, but sleep for 0.5s before each invocation
