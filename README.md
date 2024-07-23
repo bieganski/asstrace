@@ -20,33 +20,9 @@ It doesn't change the binary itself, but allows for manipulating behavior of sys
 
 In this example we run `gcc`, but prevent it from deleting temporary files.
 
-```bash
-m.bieganski@test:~/github/asstrace$ echo "int main();" | ./asstrace.py -q  -ex 'unlink:nop:msg=prevented {path} from deletion' -- gcc  -o a.out -x c -c - 
-unlink
-prevented /tmp/ccMAbcxh.s from deletion
-m.bieganski@test:~/github/asstrace$ cat /tmp/ccMAbcxh.s
-	.file	"<stdin>"
-	.text
-	.ident	"GCC: (Ubuntu 11.4.0-1ubuntu1~22.04) 11.4.0"
-	.section	.note.GNU-stack,"",@progbits
-	.section	.note.gnu.property,"a"
-	.align 8
-	.long	1f - 0f
-	.long	4f - 1f
-	.long	5
-0:
-	.string	"GNU"
-1:
-	.align 8
-	.long	0xc0000002
-	.long	3f - 2f
-2:
-	.long	0x3
-3:
-	.align 8
-4:
-m.bieganski@test:~/github/asstrace$ 
-```
+The command used: `echo "int main();" | ./asstrace.py -q  -ex 'unlink:nop:msg=prevented {path} from deletion' -- gcc  -o a.out -x c -c -`
+
+![unlink example](jpg/unlink.png)
 
 We managed to prevent GCC from removing artifacts from `/tmp/` directory. [See source code](./examples/unlink.cc)
 
