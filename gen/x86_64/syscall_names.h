@@ -461,4 +461,5 @@ const char* syscall_names[] = {
 "lsm_get_self_attr", /* 459 */
 "lsm_set_self_attr", /* 460 */
 "lsm_list_modules", /* 461 */
+"mseal", /* 462 */
 };
