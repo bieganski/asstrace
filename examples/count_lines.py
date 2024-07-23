@@ -9,7 +9,12 @@ def asstrace_write(fd, buf, num, *_):
     if not path.is_file():
         API.invoke_syscall_anyway()
     else:
-        num_lines = len(path.read_text().splitlines())
+        try:
+            num_lines = len(path.read_text().splitlines())
+        except UnicodeDecodeError:
+            # raw-bytes file
+            API.invoke_syscall_anyway()
+            return
         res_str = f"{path}({num_lines})\n"
         print(res_str, end="")
         return len(res_str) # 'ls -1' program will think that it has written that many characters. 
