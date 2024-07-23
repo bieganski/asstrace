@@ -1,12 +1,12 @@
 # About
 `asstrace` stands for **a** **s**tateful **strace**-like - Linux syscall tampering-first `strace`-like tool.
 
-As opposed to `strace`, `asstrace` is more of a framework tool than a debugging tool. If your goal is to see why some black-box binary is not working, then `strace` with all it's advanced features is the way to go.
+As opposed to `strace`, `asstrace` alters binary behavior by being "man in the middle" of binary and operating system. If your goal is to understand why some black-box binary is not working as expected, then `strace` with all it's advanced features is the way to go.
 
 `asstrace` is designed to **provide a convenient way of altering binary behavior and sharing it to other people**.
 
 It doesn't change the binary itself, but allows for manipulating behavior of system calls that the binary executes.
-`asstrace` is designed to work with `Linux`. Adding support for a new architecture is as simple as adding `arch/<arch name>.h` file. Currently `x86` and `RISC-V` are supported.
+`asstrace` is designed to work with `Linux`. Currently `x86` and `RISC-V` are supported.
 
 # Example use cases
 
@@ -18,20 +18,34 @@ It doesn't change the binary itself, but allows for manipulating behavior of sys
 
 # `unlink` example
 
-In this example we run `g++ ./asstrace.cc`, but prevent it from deleting temporary files.
+In this example we run `gcc`, but prevent it from deleting temporary files.
 
 ```bash
-myuser@myhost:~/asstrace$ make example_unlink
-g++ -rdynamic -fpermissive asstrace.cc -o asstrace
-make -C examples unlink
-g++ -I.. -shared -fPIC unlink.cc -o libunlink.so
-../asstrace ./libunlink.so g++ ../asstrace.cc 2>/dev/null | grep prevented
->> prevented /tmp/ccpiWX9G.res from removing!
->> prevented /tmp/cckCJl7b.o from removing!
->> prevented /tmp/ccVwSoa6.s from removing!
-myuser@myhost:~/github/asstrace$
-myuser@myhost:~/github/asstrace$ file /tmp/cckCJl7b.o
-/tmp/cckCJl7b.o: ELF 64-bit LSB relocatable, x86-64, version 1 (SYSV), not stripped
+m.bieganski@test:~/github/asstrace$ echo "int main();" | ./asstrace.py -q  -ex 'unlink:nop:msg=prevented {path} from deletion' -- gcc  -o a.out -x c -c - 
+unlink
+prevented /tmp/ccMAbcxh.s from deletion
+m.bieganski@test:~/github/asstrace$ cat /tmp/ccMAbcxh.s
+	.file	"<stdin>"
+	.text
+	.ident	"GCC: (Ubuntu 11.4.0-1ubuntu1~22.04) 11.4.0"
+	.section	.note.GNU-stack,"",@progbits
+	.section	.note.gnu.property,"a"
+	.align 8
+	.long	1f - 0f
+	.long	4f - 1f
+	.long	5
+0:
+	.string	"GNU"
+1:
+	.align 8
+	.long	0xc0000002
+	.long	3f - 2f
+2:
+	.long	0x3
+3:
+	.align 8
+4:
+m.bieganski@test:~/github/asstrace$ 
 ```
 
 We managed to prevent GCC from removing artifacts from `/tmp/` directory. [See source code](./examples/unlink.cc)
