@@ -112,3 +112,24 @@ mprotect(0x7f4883c28000, 0x1ee000, 0x0, 0x802, 0x3, 0x0) = 0x0
 # User Guide
 
 See [user guide](./USER_GUIDE.md) for more details.
+
+# Distribution
+
+* MIT license
+* to make `asstrace` run on your Linux only a single file is needed (`asstrace.py`)*
+* no external Python dependencies - no need for `requirements.txt` etc.
+* no native code - only CPython interpreter is required
+* cross platform - adding a new target is as simple as defining CPU ABI:
+
+```py
+    CPU_Arch.riscv64: CPU_ABI(
+        user_regs_struct_type=riscv64_user_regs_struct,
+        syscall_args_registers_ordered=[f"a{i}" for i in range(6)],
+        syscall_number="a7",
+        syscall_ret_val="a0",
+        syscall_ret_addr="ra",
+        pc="pc",
+    )
+```
+
+* the `*` gotcha is that it needs additionaly `syscall_names.csv`. It either seeks it locally (will fork if obtained `asstrace` via `git clone`) or downloads directly from GitHub (url is hardcoded in `asstrace.py`).
