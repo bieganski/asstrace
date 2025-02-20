@@ -539,13 +539,14 @@ def fmt_msg(msg: str, syscall_args: list[int]) -> str:
             raise RuntimeError(f"Auto-guessed file path at index {path_syscall_param_idx} for syscall {context.syscall_name}, but argument list provided is of length {len(syscall_args)}")
         addr = syscall_args[path_syscall_param_idx]
         path = API.ptrace_read_null_terminated(addr, 1000).decode("ascii")
-    return msg.replace("{path}", path)
+        return msg.replace("{path}", path)
+    return msg
 
 @dataclass
 class NopCmd(Cmd):
     help = "replace syscall with no-op syscall (getpid)"
     ret: int = 0
-    msg: str = "nop"
+    msg: str = None
     def _function(self):
         def aux(*syscall_invocation_params):
             if self.msg:
