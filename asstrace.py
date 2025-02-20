@@ -531,16 +531,15 @@ hang_handled  : bool = False
 
 @dataclass
 class MarkCmd(Cmd):
-    help = "XXX"
-    ret: int = 0
+    help = "'hang' command will take effect only after 'mark' hits."
     def handler(self, *syscall_invocation_params):
         global hang_flag
         hang_flag = True
-        return self.ret
+        _user_api_invoke_syscall_anyway()
 
 @dataclass
 class HangAfterMarkCmd(Cmd):
-    help = "XXX"
+    help = "'hang' command will take effect only after 'mark' hits."
     ret: int = 0
     time: float = .0
     def handler(self, *syscall_invocation_params):
