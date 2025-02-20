@@ -420,11 +420,7 @@ class Cmd():
     def __post_init__(self):
         if self.__class__ == Cmd:
             raise TypeError("Cannot instantiate abstract class.")
-    def __call__(self):
-        assert getattr(self, "_function", None)
-        return self._function()
-        # keys = self.__dataclass_fields__.keys()
-        # return self._function(**dict(((k, getattr(self, k)) for k in keys)))
+
 
 def deserialize_ex(s: str, known_cmds: dict[str, Type[Cmd]]) -> tuple[list[str], Cmd]:
     # close[,open,openat]:sleep[:time=10,x=y,...]
@@ -449,28 +445,6 @@ def deserialize_ex(s: str, known_cmds: dict[str, Type[Cmd]]) -> tuple[list[str],
     except Exception as e:
         print(f"deserialization of string '{s}' failed: {e}", file=sys.stderr)
         exit(1)
-
-@dataclass
-class DelayCmd(Cmd):
-    time: float
-    help = "invoke original syscall, but delayed"
-    def _function(self):
-        def aux(*syscall_invocation_params):
-            time.sleep(self.time)
-            _user_api_invoke_syscall_anyway()
-        return aux
-
-@dataclass
-class SleepCmd(Cmd):
-    time: float
-    help = "replace syscall with sleep"
-    ret: int = 0
-    def _function(self):
-        def aux(*syscall_invocation_params):
-            time.sleep(self.time)
-            return self.ret
-        return aux
-
 
 @dataclass
 class Signature:
@@ -547,66 +521,105 @@ class NopCmd(Cmd):
     help = "replace syscall with no-op syscall (getpid)"
     ret: int = 0
     msg: str = None
-    def _function(self):
-        def aux(*syscall_invocation_params):
-            if self.msg:
-                print(fmt_msg(self.msg, syscall_invocation_params))
-            return self.ret
-        return aux
+    def handler(self, *syscall_invocation_params):
+        if self.msg:
+            print(fmt_msg(self.msg, syscall_invocation_params))
+        return self.ret
+
+hang_flag : bool = False
+hang_handled  : bool = False
+
+@dataclass
+class MarkCmd(Cmd):
+    help = "XXX"
+    ret: int = 0
+    def handler(self, *syscall_invocation_params):
+        global hang_flag
+        hang_flag = True
+        return self.ret
+
+@dataclass
+class HangAfterMarkCmd(Cmd):
+    help = "XXX"
+    ret: int = 0
+    time: float = .0
+    def handler(self, *syscall_invocation_params):
+        global hang_flag, hang_handled
+        if hang_flag:
+            logging.info("hang!")
+            time.sleep(self.time) if self.time else input()
+            hang_handled = True
+        _user_api_invoke_syscall_anyway()
+
+@dataclass
+class DelayCmd(Cmd):
+    time: float
+    help = "invoke original syscall, but delayed"
+
+    def handler(self, *syscall_invocation_params):
+        time.sleep(self.time)
+        _user_api_invoke_syscall_anyway()
+
+@dataclass
+class SleepCmd(Cmd):
+    time: float
+    help = "replace syscall with sleep"
+    ret: int = 0
+
+    def handler(self, *syscall_invocation_params):
+        time.sleep(self.time)
+        return self.ret
 
 @dataclass
 class ExitCmd(Cmd):
     msg : str = ""
     help = "exit program at first syscall invocation"
     ret: int = 0
-    def _function(self):
-        def aux(*syscall_invocation_params):
-            if self.msg:
-                print(fmt_msg(self.msg, syscall_invocation_params))
-            exit(self.ret)
-        return aux
+
+    def handler(self, *syscall_invocation_params):
+        if self.msg:
+            print(fmt_msg(self.msg, syscall_invocation_params))
+        exit(self.ret)
 
 @dataclass
 class DetachCmd(Cmd):
     help = "detaches debugger from process"
-    def _function(self):
-        def aux(*syscall_invocation_params):
-            _user_api_detach_debugger()
-            _user_api_invoke_syscall_anyway()
-        return aux
+
+    def handler(*syscall_invocation_params):
+        _user_api_detach_debugger()
+        _user_api_invoke_syscall_anyway()
+
 @dataclass
 class PathSubstCmd(Cmd):
     old: str
     new: str
     help = "invokes syscall but with modified file path (assumes second syscall argument to be a fs path string, suitable for openat,fstatat etc.)"
     
-    def _function(self):
-        def just_subst_filepath(dfd, filename, mode, *_):
-            # empirically checked, that AT_FDCWD is 
-            # 0xffffffffffffff9c on risc-v , 0xffffff9c on x86_64 for some reason.
-            AT_FDCWD_LOWER_4BYTES = 0xffffff9c
+    def handler(self, dfd, filename, mode, *_):
+        # empirically checked, that AT_FDCWD is 
+        # 0xffffffffffffff9c on risc-v , 0xffffff9c on x86_64 for some reason.
+        AT_FDCWD_LOWER_4BYTES = 0xffffff9c
 
-            assert not ((dfd & 0xffff_ffff) ^ AT_FDCWD_LOWER_4BYTES)
-            
-            path_extractor = lambda pth: Path(pth).expanduser().absolute()
+        assert not ((dfd & 0xffff_ffff) ^ AT_FDCWD_LOWER_4BYTES)
+        
+        path_extractor = lambda pth: Path(pth).expanduser().absolute()
 
-            tracee_requested_path = API.ptrace_read_null_terminated(filename, 1024).decode("ascii")
-            
-            path, old, new = map(path_extractor, [tracee_requested_path, self.old, self.new])
-            
-            if path != old:
-                # user opens file that is out of scope of our tampering
-                API.invoke_syscall_anyway()
-                return
-            if not args.quietquiet:
-                print(f"{Color.bold}{old} -> {new}{Color.reset_bold}")
-            if len(new.name) > len(old.name):
-                raise ValueError(f"{Color.bold}memory corruption attempted (as we don't implement memory allocation yet), killing.{Color.reset_bold}")
-            if not new.exists():
-                raise ValueError(f"{new} does not exist! TODO: error might be false, if tracee is in different FS namespace.")
-            API.ptrace_write_mem_null_terminated(filename, bytes(str(new), encoding="ascii"))
+        tracee_requested_path = API.ptrace_read_null_terminated(filename, 1024).decode("ascii")
+        
+        path, old, new = map(path_extractor, [tracee_requested_path, self.old, self.new])
+        
+        if path != old:
+            # user opens file that is out of scope of our tampering
             API.invoke_syscall_anyway()
-        return just_subst_filepath
+            return
+        if not args.quietquiet:
+            print(f"{Color.bold}{old} -> {new}{Color.reset_bold}")
+        if len(new.name) > len(old.name):
+            raise ValueError(f"{Color.bold}memory corruption attempted (as we don't implement memory allocation yet), killing.{Color.reset_bold}")
+        if not new.exists():
+            raise ValueError(f"{new} does not exist! TODO: error might be false, if tracee is in different FS namespace.")
+        API.ptrace_write_mem_null_terminated(filename, bytes(str(new), encoding="ascii"))
+        API.invoke_syscall_anyway()
 
 known_expressions = {
     "sleep": SleepCmd,
@@ -615,6 +628,8 @@ known_expressions = {
     "delay": DelayCmd,
     "pathsubst": PathSubstCmd,
     "detach": DetachCmd,
+    "mark": MarkCmd,
+    "hang": HangAfterMarkCmd,
 }
 
 pathsubst_factory = lambda old, new: {
@@ -661,7 +676,7 @@ if __name__ == "__main__":
     parser.add_argument("argv", nargs="*")
     
     # 'user_hooks' is an union of all user-provided commands, either -x, -ex or -b.
-    user_hooks: dict[str, Callable] = builtins.user_hooks
+    user_hooks: dict[str, Cmd] = builtins.user_hooks
 
     args = parser.parse_args()
 
@@ -707,8 +722,12 @@ if __name__ == "__main__":
         for e in exs:
             syscalls, cmd = deserialize_ex(e, known_cmds=known_expressions)
             for x in syscalls:
-                assert x not in user_hooks
-                user_hooks[x] = cmd()
+                if x != "any":
+                    user_hooks[x] = cmd
+                else:
+                    for sysname in load_syscalls().values():
+                        if not user_hooks.get(sysname):
+                            user_hooks[sysname] = cmd
 
     if groups := args.groups:
         if "help" in groups:
@@ -720,17 +739,18 @@ if __name__ == "__main__":
             if not gname in builtin_groups:
                 print(f"unknown group '{gname}'. try 'asstrace.py -g help'", file=sys.stderr)
             g = builtin_groups[gname]
-            assert isinstance(g, (Callable, dict[str, Callable]))
-            
-            if isinstance(g, Callable):
-                expected_args = signature_get_arguments(g)
-                if (params_names := list(params.keys())) != expected_args:
-                    raise ValueError(f"Params mismatch for group '{gname}'! Was expecting {expected_args}, got {params_names} instead.")
-                g = g(**params)
+            assert isinstance(g, Callable)
+
+            expected_args = signature_get_arguments(g)
+            if (params_names := list(params.keys())) != expected_args:
+                raise ValueError(f"Params mismatch for group '{gname}'! Was expecting {expected_args}, got {params_names} instead.")
+            g = g(**params)
+
             for syscall, cmd in g.items():
+                if syscall == "any":
+                    raise NotImplementedError()
                 assert syscall not in user_hooks
-                user_hooks[syscall] = cmd()
-        pass
+                user_hooks[syscall] = cmd
 
     no_fork_but_seize_running_process = (args.pid is not None)
 
@@ -756,10 +776,12 @@ if __name__ == "__main__":
 
     # validate user_hooks.
     for x in user_hooks:
-        if x not in arch_syscalls.values():
+        if x not in arch_syscalls.values() and x != "any":
             raise RuntimeError(f"Defined user-hook for '{x}', but such syscall seemingly doesn't exist!")
 
     while True:
+        if hang_handled:
+            user_hooks = dict([(k, v) for k, v in user_hooks.items() if not isinstance(v, (HangAfterMarkCmd, MarkCmd))])
         
         ptrace(PTRACE_SYSCALL, pid, None, None)
         time.sleep(0.001) # TODO: othewise sometimes PTRACE_GETREGSET fails for unknown reason.
@@ -790,7 +812,7 @@ if __name__ == "__main__":
                     print(f"{Color.bold}{syscall_name}{Color.reset_bold}", file=sys.stderr)
                 user_hook_fn = user_hooks[syscall_name]
                 builtins.cur_syscall_context = SyscallDetailedContext(syscall_name=syscall_name)
-                hook_ret = user_hook_fn(*syscall_params_getter(regs))
+                hook_ret = user_hook_fn.handler(*syscall_params_getter(regs))
 
                 skip_real_syscall \
                     = state.cur_syscall_overriden_with_sideffectless \
