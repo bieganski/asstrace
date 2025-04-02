@@ -15,6 +15,7 @@ import platform
 from enum import Enum
 from dataclasses import dataclass, _MISSING_TYPE
 import time
+import errno
 
 class Color(Enum):
     bold = "\033[1m"
@@ -76,31 +77,33 @@ class iovec(ctypes_Struct_wrapper):
         ("iov_base", ctypes.c_void_p),
         ("iov_len", ctypes.c_ulong)
     ]
+from enum import IntEnum
 
-PTRACE_PEEKTEXT   = 1
-PTRACE_PEEKDATA   = 2
-PTRACE_POKETEXT   = 4
-PTRACE_POKEDATA   = 5
-PTRACE_CONT       = 7
-PTRACE_SINGLESTEP = 9
-PTRACE_GETREGS    = 12
-PTRACE_SETREGS    = 13
-PTRACE_ATTACH     = 16
-PTRACE_DETACH     = 17
-
-PTRACE_SYSCALL = 24
-
-PTRACE_GETREGSET = 0x4204
-PTRACE_SETREGSET = 0x4205
-PTRACE_SETOPTIONS = 0x4200
-PTRACE_GET_SYSCALL_INFO = 0x420e
+class PtraceOp(IntEnum):
+    PTRACE_PEEKTEXT   = 1
+    PTRACE_PEEKDATA   = 2
+    PTRACE_POKETEXT   = 4
+    PTRACE_POKEDATA   = 5
+    PTRACE_CONT       = 7
+    PTRACE_SINGLESTEP = 9
+    PTRACE_GETREGS    = 12
+    PTRACE_SETREGS    = 13
+    PTRACE_ATTACH     = 16
+    PTRACE_DETACH     = 17
+    PTRACE_SYSCALL    = 24
+    PTRACE_INTERRUPT  = 0x4207
+    PTRACE_SEIZE      = 0x4206
+    PTRACE_GETREGSET  = 0x4204
+    PTRACE_SETREGSET  = 0x4205
+    PTRACE_SETOPTIONS = 0x4200
+    PTRACE_GET_SYSCALL_INFO = 0x420e
 
 PTRACE_SYSCALL_INFO_NONE = 0
 PTRACE_SYSCALL_INFO_ENTRY = 1
 PTRACE_SYSCALL_INFO_EXIT = 2
 PTRACE_SYSCALL_INFO_SECCOMP = 3
 
-NT_PRSTATUS = 1 # from 'man ptrace': NT_PRSTATUS (with numerical value 1)
+NT_PRSTATUS = 1
 
 PTRACE_O_TRACESYSGOOD = 1
 PTRACE_O_EXITKILL = 0x00100000
@@ -108,6 +111,13 @@ PTRACE_O_EXITKILL = 0x00100000
 SIGTRAP = 5
 SIGCHLD = 17
 SIGSTOP = 19
+
+WCONTINUED = 0x00000008
+WEXITED	= 0x00000004
+WNOHANG = 0x00000001
+WUNTRACED = 0x00000002
+WSTOPPED = WUNTRACED
+
 
 class CPU_Arch(Enum):
     """
@@ -137,7 +147,7 @@ class CPU_ABI:
 KNOWN_ABI : dict[CPU_Arch, CPU_ABI] = {
     CPU_Arch.x86_64: CPU_ABI(
         user_regs_struct_type=x86_64_user_regs_struct,
-        syscall_args_registers_ordered=["rdi", "rsi", "rdx", "rcx", "r8", "r9"],
+        syscall_args_registers_ordered=["rdi", "rsi", "rdx", "r10", "r8", "r9"],
         syscall_number="orig_rax",
         syscall_ret_val="rax",
         syscall_ret_addr="rcx", # For x86, address of instruction following SYSCALL is stored in RCX (and RFLAGS in R11). https://www.felixcloutier.com/x86/syscall
@@ -194,19 +204,28 @@ def system_find_self_lib(prefix: str) -> Path:
     return matches[0]
 
 libdl = ctypes.CDLL(system_find_self_lib(prefix="ld-linux"))
-libc = ctypes.CDLL(system_find_self_lib(prefix="libc.so"))
+libc = ctypes.CDLL(system_find_self_lib(prefix="libc.so"), use_errno=True)
 
 libc.dlopen.restype = ctypes.c_void_p
 libc.dlsym.restype = ctypes.c_void_p
 libc.ptrace.restype = ctypes.c_uint64
 libc.ptrace.argtypes = [ctypes.c_uint64, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_void_p]
-ptrace = libc.ptrace
+
+libc.waitpid.restype = ctypes.c_int
+libc.waitpid.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
+
+def ptrace(op: PtraceOp, pid, addr, data):
+    assert isinstance(op, PtraceOp)
+    res = libc.ptrace(op, pid, addr, data)
+    if res != 0:
+        err = ctypes.get_errno()
+        raise RuntimeError(f"{op.name} failed! errno={0 if errno == 0 else errno.errorcode[err]}")
+    return res
 
 def _ptrace_get_or_set_regs_arch_agnostic(pid: int, ref: user_regs_struct, do_set: bool):
-    op = PTRACE_SETREGSET if do_set else PTRACE_GETREGSET
+    op = PtraceOp.PTRACE_SETREGSET if do_set else PtraceOp.PTRACE_GETREGSET
     v = iovec(ctypes.cast(ctypes.byref(ref), ctypes.c_void_p), ctypes.sizeof(ref))
-    res = ptrace(op, pid, NT_PRSTATUS, ctypes.byref(v))
-    assert res == 0, hex(res)
+    ptrace(op, pid, NT_PRSTATUS, ctypes.byref(v))
 
 def ptrace_get_regs_arch_agnostic(pid: int, user_regs: user_regs_struct):
     return _ptrace_get_or_set_regs_arch_agnostic(pid=pid, ref=user_regs, do_set=False)
@@ -356,6 +375,9 @@ class API:
 def check_child_alive_or_exit(pid: int):
     stat = os.waitpid(pid, 0)
     status = stat[1]
+    print(status)
+
+    assert os.WIFSTOPPED(status)
 
     if os.WIFEXITED(status):
         if exit_code := os.WEXITSTATUS(status):
@@ -372,7 +394,7 @@ def prepare_tracee(pid: int, no_fork_but_seize_running_process: bool):
     flags = PTRACE_O_TRACESYSGOOD
     if not no_fork_but_seize_running_process:
         flags |= PTRACE_O_EXITKILL
-    ptrace(PTRACE_SETOPTIONS, pid, None, flags)
+    ptrace(PtraceOp.PTRACE_SETOPTIONS, pid, None, flags)
 
 def get_sideeffectfree_syscall_number(arch_syscalls : dict[int, str]) -> int:
     name = "getpid"
@@ -751,19 +773,30 @@ if __name__ == "__main__":
                 assert syscall not in user_hooks
                 user_hooks[syscall] = cmd
 
-    no_fork_but_seize_running_process = (args.pid is not None)
+    # no_fork_but_seize_running_process = (args.pid is not None)
 
-    if not no_fork_but_seize_running_process:
-        process = subprocess.Popen(args.argv)
-        pid = builtins.tracee_pid = process.pid
-    else:
-        pid = args.pid
+    # if not no_fork_but_seize_running_process:
+    #     process = subprocess.Popen(args.argv)
+    #     pid = builtins.tracee_pid = process.pid
+    # else:
+    #     pid = args.pid
 
-    res = ptrace(PTRACE_ATTACH, pid, None, None)
+    # ptrace(PtraceOp.PTRACE_SEIZE, pid, None, None)
 
-    check_child_alive_or_exit(pid)
+    # ptrace(PtraceOp.PTRACE_INTERRUPT, pid, None, None)
 
-    prepare_tracee(pid=pid, no_fork_but_seize_running_process=no_fork_but_seize_running_process)
+    def wait(pid):
+        assert pid > 0
+        res = libc.waitpid(pid, 0, WUNTRACED | WCONTINUED)
+        assert res > 0 # TODO WNOHANG?
+
+    # wait(pid)
+    # time.sleep(0.1)
+
+    # check_child_alive_or_exit(pid)
+
+    # prepare_tracee(pid=pid, no_fork_but_seize_running_process=True)
+    # ptrace(PtraceOp.PTRACE_INTERRUPT, pid, None, None)
 
     class loop_state:
         cur_syscall_overriden_with_sideffectless: bool = False
@@ -776,13 +809,53 @@ if __name__ == "__main__":
     # validate user_hooks.
     for x in user_hooks:
         if x not in arch_syscalls.values() and x != "any":
-            raise RuntimeError(f"Defined user-hook for '{x}', but such syscall seemingly doesn't exist!")
+            logging.warning(f"Defined user-hook for '{x}', but such syscall seemingly doesn't exist!")
+    
+    from collections import Counter
+    d = Counter()
+
+    # ptrace(PtraceOp.PTRACE_CONT, pid, None, None)
+    process = subprocess.Popen(" ".join(args.argv), shell=True)
+    pid = builtins.tracee_pid = process.pid
+
+    print("PID: ", pid, file=sys.stderr)
+
+    start_time = time.time()
+    timeout_sec = 2.0
+
+    # ptrace(PtraceOp.PTRACE_SEUZE, pid, None, None)
+    # wait(pid)
+    
+    while time.time() - start_time < timeout_sec:
+
+        try:
+            ptrace(PtraceOp.PTRACE_ATTACH, pid, None, None)
+            wait(pid)
+            # prepare_tracee(pid=pid, no_fork_but_seize_running_process=True)
+
+            regs = user_regs_struct()
+            ptrace_get_regs_arch_agnostic(pid=pid, user_regs=regs)
+            d[getattr(regs, system_abi.pc)] += 1
+            # print(d, file=sys.stderr)
+            
+            ptrace(PtraceOp.PTRACE_DETACH, pid, None, None)
+
+            time.sleep(0.00001)
+        except RuntimeError:
+            # ptrace failed, tracee is dead
+            break
+    arr = sorted(d.items(), key=lambda tup: tup[1], reverse=True)[:10]
+    arr = sorted(arr, key=lambda tup: tup[0])
+    for k, v in arr:
+        print(hex(k), v, file=sys.stderr)
+    print("DONE")
+    exit(0)
 
     while True:
         if hang_handled:
             user_hooks = dict([(k, v) for k, v in user_hooks.items() if not isinstance(v, (HangAfterMarkCmd, MarkCmd))])
         
-        ptrace(PTRACE_SYSCALL, pid, None, None)
+        ptrace(PtraceOp.PTRACE_SYSCALL, pid, None, None)
         time.sleep(0.001) # TODO: othewise sometimes PTRACE_GETREGSET fails for unknown reason.
     
         regs = builtins.tracee_regs = user_regs_struct()
@@ -790,7 +863,7 @@ if __name__ == "__main__":
         ptrace_get_regs_arch_agnostic(pid=pid, user_regs=regs)
 
         syscall_info = ptrace_syscall_info()
-        ptrace(PTRACE_GET_SYSCALL_INFO, pid, ctypes.sizeof(ptrace_syscall_info), ctypes.byref(syscall_info))
+        ptrace(PtraceOp.PTRACE_GET_SYSCALL_INFO, pid, ctypes.sizeof(ptrace_syscall_info), ctypes.byref(syscall_info))
         
         if syscall_info.op not in [PTRACE_SYSCALL_INFO_EXIT, PTRACE_SYSCALL_INFO_ENTRY, PTRACE_SYSCALL_INFO_NONE]:
             print(f"PTRACE_GET_SYSCALL_INFO: unknown/unexpected op: {syscall_info.op}")
@@ -837,7 +910,7 @@ if __name__ == "__main__":
         elif syscall_info.op == PTRACE_SYSCALL_INFO_EXIT:
             if builtins.user_requested_debugger_detach:
                 print(f"{Color.bold}asstrace: detaching from {pid} on user request{Color.reset_bold}", flush=True)
-                res = ptrace(PTRACE_DETACH, pid, None, None)
+                res = ptrace(PtraceOp.PTRACE_DETACH, pid, None, None)
                 assert res == 0
                 exit(0)
             if state.cur_syscall_overriden_with_sideffectless:
