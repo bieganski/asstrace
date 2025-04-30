@@ -776,7 +776,7 @@ if __name__ == "__main__":
     # validate user_hooks.
     for x in user_hooks:
         if x not in arch_syscalls.values() and x != "any":
-            raise RuntimeError(f"Defined user-hook for '{x}', but such syscall seemingly doesn't exist!")
+            logging.warning(f"Defined user-hook for '{x}', but such syscall seemingly doesn't exist!")
 
     while True:
         if hang_handled:
