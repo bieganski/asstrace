@@ -696,6 +696,9 @@ if __name__ == "__main__":
     parser.add_argument("-p", "--pid", type=int)
     parser.add_argument("argv", nargs="*")
     
+    parser.add_argument("-F", "--frequency", type=int, required=True)
+    parser.add_argument("-t", "--timeout", type=float, required=True)
+    
     # 'user_hooks' is an union of all user-provided commands, either -x, -ex or -b.
     user_hooks: dict[str, Cmd] = builtins.user_hooks
 
@@ -821,29 +824,36 @@ if __name__ == "__main__":
     print("PID: ", pid, file=sys.stderr)
 
     start_time = time.time()
-    timeout_sec = 2.0
+    timeout_sec = args.timeout
+    delay = 1 / args.frequency
 
-    # ptrace(PtraceOp.PTRACE_SEUZE, pid, None, None)
+    ptrace(PtraceOp.PTRACE_SEIZE, pid, None, None)
+    # time.sleep(0.1)
+    # ptrace(PtraceOp.PTRACE_SETOPTIONS, pid, None, PTRACE_O_EXITKILL)
     # wait(pid)
+
+    regs = user_regs_struct()
     
     while time.time() - start_time < timeout_sec:
 
         try:
-            ptrace(PtraceOp.PTRACE_ATTACH, pid, None, None)
+            ptrace(PtraceOp.PTRACE_INTERRUPT, pid, None, None)
             wait(pid)
-            # prepare_tracee(pid=pid, no_fork_but_seize_running_process=True)
 
-            regs = user_regs_struct()
+            ptrace(PtraceOp.PTRACE_SETOPTIONS, pid, None, PTRACE_O_EXITKILL)
+
+            
             ptrace_get_regs_arch_agnostic(pid=pid, user_regs=regs)
             d[getattr(regs, system_abi.pc)] += 1
-            # print(d, file=sys.stderr)
-            
-            ptrace(PtraceOp.PTRACE_DETACH, pid, None, None)
 
-            time.sleep(0.00001)
-        except RuntimeError:
-            # ptrace failed, tracee is dead
+            ptrace(PtraceOp.PTRACE_CONT, pid, None, None)
+            time.sleep(delay)
+    
+        except Exception as e:
+            print(e, file=sys.stderr)
             break
+    
+    print(f"number of unique PC: {len(d)}", file=sys.stderr)
     arr = sorted(d.items(), key=lambda tup: tup[1], reverse=True)[:10]
     arr = sorted(arr, key=lambda tup: tup[0])
     for k, v in arr:
