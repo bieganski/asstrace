@@ -45,6 +45,8 @@ def main():
     elif operation == "read":
         # Parse the count as a hexadecimal number.
         try:
+            if not args.value.startswith("0x"):
+                raise ValueError()
             size = int(args.value, 16)
         except ValueError:
             print("Error: Invalid hex string for count.", file=sys.stderr)
