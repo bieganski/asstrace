@@ -264,6 +264,10 @@ def _read_or_write_process_memory(address, size, data, pid: int, do_write: bool)
         pid, ctypes.byref(local_iovec), 1, ctypes.byref(remote_iovec), 1, 0
     )
 
+    if bytes_transferred < 0:
+        name = f.__name__
+        raise RuntimeError(f"<{name}> invocation failed! Use 'strace -e {name}' for more details ")
+
     if do_write:
         return bytes_transferred
     return bytes_buffer.raw
