@@ -137,7 +137,7 @@ class CPU_ABI:
 KNOWN_ABI : dict[CPU_Arch, CPU_ABI] = {
     CPU_Arch.x86_64: CPU_ABI(
         user_regs_struct_type=x86_64_user_regs_struct,
-        syscall_args_registers_ordered=["rdi", "rsi", "rdx", "rcx", "r8", "r9"],
+        syscall_args_registers_ordered=["rdi", "rsi", "rdx", "r10", "r8", "r9"],
         syscall_number="orig_rax",
         syscall_ret_val="rax",
         syscall_ret_addr="rcx", # For x86, address of instruction following SYSCALL is stored in RCX (and RFLAGS in R11). https://www.felixcloutier.com/x86/syscall
@@ -815,7 +815,10 @@ if __name__ == "__main__":
                     print(f"{Color.bold}{syscall_name}{Color.reset_bold}", file=sys.stderr)
                 user_hook_fn = user_hooks[syscall_name]
                 builtins.cur_syscall_context = SyscallDetailedContext(syscall_name=syscall_name)
-                hook_ret = user_hook_fn.handler(*syscall_params_getter(regs))
+                if isinstance(user_hook_fn, Cmd):
+                    hook_ret = user_hook_fn.handler(*syscall_params_getter(regs))
+                else:
+                    hook_ret = user_hook_fn(*syscall_params_getter(regs))
 
                 skip_real_syscall \
                     = state.cur_syscall_overriden_with_sideffectless \
