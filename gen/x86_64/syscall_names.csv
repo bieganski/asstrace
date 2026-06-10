@@ -111,6 +111,7 @@ gettid,186
 gettimeofday,96
 getuid,102
 getxattr,191
+getxattrat,464
 init_module,175
 inotify_add_watch,254
 inotify_init,253
@@ -145,6 +146,7 @@ linkat,265
 listen,50
 listmount,458
 listxattr,194
+listxattrat,465
 llistxattr,195
 lookup_dcookie,212
 lremovexattr,198
@@ -198,6 +200,7 @@ newfstatat,262
 open,2
 open_by_handle_at,304
 open_tree,428
+open_tree_attr,467
 openat,257
 openat2,437
 pause,34
@@ -241,6 +244,7 @@ recvmmsg,299
 recvmsg,47
 remap_file_pages,216
 removexattr,197
+removexattrat,466
 rename,82
 renameat,264
 renameat2,316
@@ -303,6 +307,7 @@ setsockopt,54
 settimeofday,164
 setuid,105
 setxattr,188
+setxattrat,463
 shmat,30
 shmctl,31
 shmdt,67
@@ -348,6 +353,7 @@ uname,63
 unlink,87
 unlinkat,263
 unshare,272
+uretprobe,335
 userfaultfd,323
 ustat,136
 utime,132
